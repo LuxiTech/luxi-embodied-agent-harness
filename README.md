@@ -111,7 +111,6 @@ sudo sysctl -w net.core.rmem_default=67108864
 ./scripts/luxi-ui.sh
 ```
 
-打开 **http://127.0.0.1:8787/**。确认第一视角持续刷新、地图出现观测数据、运行时就绪。未配置模型时可检查仿真和界面；自然语言任务需要下一步的模型配置。
 
 ### 5. 配置自然语言任务
 
@@ -160,7 +159,6 @@ source scripts/lib/dimos_env.sh
 python scripts/composed_dashboard.py --backend mujoco --port 8787 --no-browser
 ```
 
-打开 http://127.0.0.1:8787/，选择组合模式并提交指令，核对目标后点击“确认目标并执行”。模型生成步骤计划，再逐次调用技能；只有 `compose_verify` 能宣布整个任务完成。按 **Ctrl+C** 关闭操作台及其托管仿真。
 
 候选取放使用 `sim_attachment` / `sim_placement`：到位停稳后，物体可瞬移到掌心或标注桌面；这不是真实接触抓取。导航、精调与取放交接共用 0.15 m / 0.15 rad 的到位容差；普通位置目标可以不要求终点朝向。运输和放置前检查当前持物，`acquired` 保存取物历史，`placed_on` 验证最终放置状态。
 
