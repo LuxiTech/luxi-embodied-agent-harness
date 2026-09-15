@@ -1,0 +1,8 @@
+{
+  "task_key": "attachment-example",
+  "instruction": "到指定取物位置吸附水瓶，再带到指定交付位置并停稳。",
+  "pickup": [2.05, 0.49, 1.5707963267948966],
+  "destination": [-3.0, -1.75, 0.0],
+  "entity_id": "water_bottle",
+  "release": false
+}

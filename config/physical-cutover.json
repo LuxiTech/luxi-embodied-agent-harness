@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "backends": {
+    "mujoco": {
+      "status": "partial",
+      "accepted_tools": [
+        "stop_robot",
+        "move_robot",
+        "turn_around",
+        "walk_room_loop",
+        "approach_visual_target",
+        "approach_person",
+        "fetch_object",
+        "explore_frontiers",
+        "navigate_with_text"
+      ],
+      "default_enabled": [
+        "stop_robot",
+        "move_robot",
+        "turn_around",
+        "walk_room_loop",
+        "approach_visual_target",
+        "approach_person",
+        "fetch_object",
+        "explore_frontiers",
+        "navigate_with_text"
+      ],
+      "runtime_fenced_tools": [
+        "move_robot",
+        "approach_visual_target",
+        "approach_person",
+        "fetch_object",
+        "explore_frontiers",
+        "navigate_with_text"
+      ],
+      "accepted_at": "2026-09-04T06:46:34Z",
+      "policy_revision": "safety-v1",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "isaac-g1": {
+      "status": "partial",
+      "accepted_tools": [
+        "stop_robot",
+        "stop_navigation",
+        "relative_move",
+        "move_distance",
+        "turn_around",
+        "move_robot",
+        "navigate_to_pose",
+        "navigate_to_tag",
+        "explore_frontiers",
+        "object_search",
+        "follow_person",
+        "approach_person",
+        "navigate_with_text"
+      ],
+      "default_enabled": [
+        "stop_robot",
+        "stop_navigation",
+        "relative_move",
+        "move_distance",
+        "turn_around",
+        "move_robot",
+        "navigate_to_pose",
+        "navigate_to_tag",
+        "explore_frontiers",
+        "object_search",
+        "follow_person",
+        "approach_person",
+        "navigate_with_text"
+      ],
+      "runtime_fenced_tools": [
+        "relative_move",
+        "move_distance",
+        "turn_around",
+        "move_robot",
+        "navigate_to_pose",
+        "navigate_to_tag",
+        "explore_frontiers",
+        "object_search",
+        "follow_person",
+        "approach_person",
+        "navigate_with_text"
+      ],
+      "accepted_at": "2026-09-03T09:26:00Z",
+      "policy_revision": "safety-v1",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "mujoco-go2": {
+      "status": "partial",
+      "accepted_tools": [
+        "stop_robot",
+        "inspect_warehouse",
+        "object_search",
+        "follow_person"
+      ],
+      "default_enabled": [
+        "stop_robot",
+        "inspect_warehouse",
+        "object_search",
+        "follow_person"
+      ],
+      "runtime_fenced_tools": [
+        "inspect_warehouse",
+        "object_search",
+        "follow_person"
+      ],
+      "accepted_at": "2026-09-09T08:36:48.235194+00:00",
+      "policy_revision": "safety-v1",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    }
+  }
+}

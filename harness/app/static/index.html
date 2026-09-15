@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Luxi Embodied Ops</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <div class="eyebrow">LUXI / EMBODIED OPS</div>
+          <h1>G1 仿真操作台</h1>
+        </div>
+      </div>
+
+      <div class="status-rack" aria-label="系统状态">
+        <div class="status-chip" id="sim-status"><i></i><span>SIM</span><strong>连接中</strong></div>
+        <div class="status-chip" id="mcp-status"><i></i><span>MCP</span><strong>连接中</strong></div>
+        <div class="status-chip" id="nav-status"><i></i><span>NAV</span><strong>连接中</strong></div>
+        <div class="status-chip" id="agent-status"><i></i><span>AGENT</span><strong>待机</strong></div>
+        <button class="ghost-button" id="start-sim" type="button">启动仿真</button>
+        <button
+          class="reset-button"
+          id="reset-experiment"
+          type="button"
+          title="停车并重建机器人、地图、轨迹与空间记忆"
+        >
+          <span class="reset-icon" aria-hidden="true">↻</span><span id="reset-label">复位实验</span>
+        </button>
+        <button class="stop-button" id="emergency-stop" type="button">
+          <span class="stop-icon"></span>急停
+        </button>
+      </div>
+    </header>
+
+    <main class="dashboard">
+      <section class="panel camera-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="section-number">01</span>
+            <h2>仿真执行画面</h2>
+          </div>
+          <div class="heading-meta"><span>Agent 仅第一视角</span><b id="backend-stream">BACKEND / CONNECTING</b></div>
+        </div>
+
+        <div class="vision-grid">
+          <div class="vision-view observer-view" id="observer-view">
+            <div class="vision-title">
+              <span>第三人称执行 · 操作者专用</span>
+              <b id="observer-state">等待画面</b>
+            </div>
+            <div class="camera-stage">
+              <img class="camera-feed" id="third-person-feed" alt="G1 第三人称实时画面" />
+              <div class="camera-placeholder" id="third-person-placeholder">
+                <div class="scanner"></div>
+                <span>NO OBSERVER FRAME</span>
+                <small>仿真启动后接入跟随相机</small>
+              </div>
+              <div class="camera-hud hud-top"><span>OBSERVER / FOLLOW</span><span id="observer-profile">640 × 360</span></div>
+              <div class="camera-hud hud-bottom">
+                <span id="pose-hud">X -- · Y -- · YAW --</span>
+                <span class="risk-badge unknown" id="risk-badge">UNKNOWN</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="vision-view head-view">
+            <div class="vision-title">
+              <span id="primary-camera-title">机器人第一视角</span>
+              <b id="camera-state">等待视频</b>
+            </div>
+            <div class="camera-stage">
+              <img class="camera-feed" id="camera-feed" alt="G1 头部相机实时画面" />
+              <div class="camera-placeholder" id="camera-placeholder">
+                <div class="scanner"></div>
+                <span>NO SENSOR FRAME</span>
+                <small>接入 DimOS 共享内存 RGB</small>
+              </div>
+              <div class="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+              <div class="camera-hud hud-top"><span>HEAD / RGB</span><span id="frame-clock">--:--:--</span></div>
+              <div class="camera-hud hud-bottom head-status-hud">
+                <span id="head-pose-hud">X -- · Y -- · YAW --</span>
+                <span class="risk-badge unknown" id="head-risk-badge">UNKNOWN</span>
+              </div>
+            </div>
+          </div>
+
+
+        </div>
+
+        <div class="telemetry-strip">
+          <div class="telemetry-item"><span>命令 X</span><strong id="cmd-x">0.000</strong><em>m/s</em></div>
+          <div class="telemetry-item"><span>命令 Y</span><strong id="cmd-y">0.000</strong><em>m/s</em></div>
+          <div class="telemetry-item"><span>命令偏航</span><strong id="cmd-yaw">0.000</strong><em>rad/s</em></div>
+          <div class="telemetry-item measured"><span>实测平移</span><strong id="measured-speed">--</strong><em>m/s</em></div>
+          <div class="telemetry-item accent" id="person-telemetry" hidden><span>在线人物距离</span><strong id="person-distance">--</strong><em>m</em></div>
+          <div class="telemetry-item"><span>最近障碍</span><strong id="obstacle-distance">--</strong><em>m</em></div>
+        </div>
+        <div class="manual-control" id="manual-control" hidden>
+          <div class="manual-control-copy">
+            <span>OPERATOR CONTROL</span>
+            <strong id="manual-control-state">键盘控制关闭</strong>
+            <small id="manual-control-help">按住移动，松键停车；窗口失焦或 0.35 秒无刷新自动归零。</small>
+          </div>
+          <label class="manual-target-select">
+            <span>控制对象</span>
+            <select id="manual-control-target">
+              <option value="robot">机器人</option>
+              <option value="person">人物</option>
+            </select>
+          </label>
+          <div class="manual-keypad" aria-label="WASD 键盘控制">
+            <kbd data-manual-key="KeyW">W</kbd>
+            <kbd data-manual-key="KeyA">A</kbd>
+            <kbd data-manual-key="KeyS">S</kbd>
+            <kbd data-manual-key="KeyD">D</kbd>
+          </div>
+          <div class="manual-control-actions">
+            <span id="manual-control-keys-help">W/S 前后 · A/D 踏步转向 · Esc 退出</span>
+            <div class="person-control-actions" id="person-control-actions" hidden>
+              <button id="person-pause" type="button">暂停人物</button>
+              <button id="person-resume" type="button">恢复预设路线</button>
+            </div>
+            <button id="manual-mode-toggle" type="button">开启键盘控制</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel agent-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="section-number">02</span>
+            <h2>语言代理</h2>
+          </div>
+          <div class="agent-orbit" id="agent-orbit"><span></span></div>
+        </div>
+
+        <div class="recovery-banner" id="recovery-banner" hidden>
+          <div>
+            <span>LOCAL SAFETY RECOVERY</span>
+            <strong id="recovery-title">安全回撤</strong>
+          </div>
+          <p id="recovery-detail">正在等待安全状态。</p>
+        </div>
+
+        <div class="long-task-card" id="long-task-card" hidden>
+          <div class="long-task-heading">
+            <div>
+              <span>UI-OWNED LONG TASK</span>
+              <strong id="long-task-title">fetch_object</strong>
+            </div>
+            <button id="cancel-long-task" type="button">取消任务</button>
+          </div>
+          <dl>
+            <div><dt>JOB</dt><dd id="long-task-id">--</dd></div>
+            <div><dt>STAGE</dt><dd id="long-task-stage">--</dd></div>
+            <div><dt>RESULT</dt><dd id="long-task-result">--</dd></div>
+            <div id="long-task-cancel-row" hidden><dt>CANCEL</dt><dd id="long-task-cancel-reason">--</dd></div>
+          </dl>
+        </div>
+
+        <div class="agent-process-shell">
+          <div class="agent-process-heading">
+            <div>
+              <span>AGENT EXECUTION</span>
+              <strong>当前执行过程</strong>
+            </div>
+            <span class="agent-process-state idle" id="agent-process-state">等待指令</span>
+          </div>
+          <div class="agent-process" id="agent-process" aria-live="polite">
+            <div class="agent-process-empty">模型步骤、工具调用、结果与耗时会实时显示在这里。</div>
+          </div>
+          <p class="agent-process-boundary">显示可审计的规划步骤与工具事实；不展示不可验证的隐藏思维链。</p>
+        </div>
+
+        <div class="agent-response" id="agent-response" aria-live="polite">
+          <div class="response-empty">
+            <span id="agent-link-label">AGENT LINK READY</span>
+            <p>输入自然语言指令。代理会观测、调用 DimOS 工具并把过程记录在下方时间线。</p>
+          </div>
+        </div>
+
+        <div class="suggestions" aria-label="指令模板">
+          <button type="button" data-requires-go2 data-command="寻找红色方块" hidden>寻找红色方块</button>
+          <button type="button" data-requires-go2 data-command="寻找蓝色球" hidden>寻找蓝色球</button>
+          <button type="button" data-requires-go2 data-command="寻找水瓶" hidden>寻找水瓶</button>
+          <button type="button" data-requires-go2 data-command="跟随这个人 12秒" hidden>跟随人物</button>
+          <button type="button" data-command="观察当前环境，说明机器人与在线检测到的障碍位置关系，不要移动。">只观察</button>
+          <button type="button" data-requires-navigation data-command="把机器人当前位置标记为起点，不要移动。">标记起点</button>
+          <button type="button" data-requires-navigation data-command="导航返回已标记的起点，到达或超时后停止。">返回起点</button>
+          <button type="button" data-requires-person data-command="让机器人远离在线检测到的人物，确认安全距离后停止。" hidden>远离人物</button>
+          <button type="button" data-requires-navigation data-command="查看当前建图状态，汇报已知区域和障碍，不要移动。">查看地图</button>
+          <button type="button" data-command="立即停止运动并保持零速度。">停止运动</button>
+        </div>
+
+        <form id="command-form" class="command-form">
+
+          <label for="execution-mode">任务执行方式</label>
+          <select id="execution-mode">
+            <option value="terminal">预定义任务</option>
+            <option value="composed" disabled>自主组合（当前后端未开放）</option>
+          </select>
+          <label for="composed-task" id="composed-task-label" hidden>组合任务</label>
+          <select id="composed-task" hidden></select>
+          <div id="composed-goal-preview" hidden><p>请核对本次任务的完整目标；确认后才会开始执行。</p><ol id="composed-goal-conditions"></ol><button type="button" id="confirm-composed-goal">确认目标并执行</button></div>
+          <button type="button" id="pause-composed" hidden>暂停组合任务</button>
+          <button type="button" id="resume-composed" hidden>重新观察并恢复任务</button>
+          <ol id="composed-progress" aria-live="polite" hidden></ol>
+          <label for="instruction">给机器人下指令</label>
+          <textarea
+            id="instruction"
+            name="instruction"
+            maxlength="4000"
+            rows="4"
+            placeholder="例如：先观察四周，然后远离人和桌子，在空旷处停下。"
+          ></textarea>
+          <div class="command-actions">
+            <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</span>
+            <button type="submit" id="send-command">
+              <span id="agent-submit-label">交给 Agent</span><i aria-hidden="true">↗</i>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel map-panel">
+        <div class="panel-heading compact">
+          <div>
+            <span class="section-number">03</span>
+            <h2 id="map-panel-title">实时建图与空间态势</h2>
+          </div>
+          <div class="map-heading-tools">
+            <span class="map-live-state offline" id="map-state">等待地图</span>
+            <button class="map-save-button" id="save-map" type="button">保存快照</button>
+          </div>
+        </div>
+        <div class="scene-control" id="scene-control" hidden>
+          <div class="scene-field scene-field-wide">
+            <label for="scene-select">仿真场景</label>
+            <select id="scene-select" aria-label="选择 MuJoCo 仿真场景"></select>
+          </div>
+          <div class="scene-field scene-seed-field" id="scene-seed-field">
+            <label for="scene-seed">SEED</label>
+            <input id="scene-seed" type="number" min="0" max="2147483647" step="1" value="0" />
+          </div>
+          <label class="scene-person-toggle" id="scene-person-field" for="scene-person">
+            <input id="scene-person" type="checkbox" />
+            <span>显式加入人物</span>
+          </label>
+          <button id="switch-scene" type="button">切换场景</button>
+          <div class="scene-description">
+            <strong id="scene-current">--</strong>
+            <span id="scene-description">场景切换会先停车，再清空地图、轨迹和空间记忆。</span>
+          </div>
+        </div>
+        <div class="map-layout">
+          <div class="map-canvas-wrap">
+            <div class="map-scroll" id="map-scroll" tabindex="0" aria-label="可滚动的共享建图视图">
+              <canvas id="world-map" aria-label="机器人共享全局建图"></canvas>
+            </div>
+            <div class="map-legend floating" aria-label="地图图例">
+              <span><i class="occupied-cell"></i>障碍</span>
+              <span><i class="known-cell"></i>已知空间</span>
+              <span><i class="robot-dot"></i>G1</span>
+              <span><i class="prior-dot"></i>在线传感器</span>
+            </div>
+            <span class="map-scale" id="map-scale">LOCAL ±4 m</span>
+          </div>
+          <div class="observation-column">
+            <div class="observation-title"><span>OBSERVED</span><strong id="map-summary">结构化观测</strong></div>
+
+            <div id="observation-list" class="observation-list">
+              <div class="observation-empty">等待位姿与距离数据</div>
+            </div>
+            <div class="world-note">
+              <span>数据边界</span>
+              <p id="world-data-boundary">栅格与距离只来自本轮 DimOS 在线传感器；隐藏场景几何不会进入 UI 或 Agent 观测。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel trace-panel">
+        <div class="panel-heading compact">
+          <div>
+            <span class="section-number">04</span>
+            <h2>工具链调用记录</h2>
+          </div>
+          <div class="trace-controls" role="group" aria-label="记录筛选">
+            <button type="button" class="active" data-filter="all">全部</button>
+            <button type="button" data-filter="tool">工具</button>
+            <button type="button" data-filter="agent">代理</button>
+            <button type="button" data-filter="perception">观测</button>
+            <button type="button" data-filter="system">系统</button>
+          </div>
+        </div>
+        <div class="trace-header">
+          <span>TIME</span><span>SOURCE</span><span>EVENT / DETAIL</span><span>STATE</span>
+        </div>
+        <div class="trace-list" id="trace-list" aria-live="polite">
+          <div class="trace-empty">等待事件流</div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>LOCAL LOOPBACK ONLY</span>
+      <span>DimOS bus · 239.255.76.67:17667 · TTL 0</span>
+      <span id="server-clock">SERVER --</span>
+    </footer>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

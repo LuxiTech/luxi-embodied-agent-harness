@@ -1,0 +1,22 @@
+FROM ubuntu:24.04 AS builder
+
+ARG FASTLIO_REPOSITORY=https://github.com/dimensionalOS/dimos-module-fastlio2.git
+ARG FASTLIO_COMMIT=a32c9f599940a94595aa72868e2e4ab436a44b75
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install --no-install-recommends -y \
+      build-essential ca-certificates cmake git libeigen3-dev libpcl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --filter=blob:none "${FASTLIO_REPOSITORY}" /src/fastlio \
+    && git -C /src/fastlio checkout "${FASTLIO_COMMIT}" \
+    && test "$(git -C /src/fastlio rev-parse HEAD)" = "${FASTLIO_COMMIT}"
+COPY native/fastlio2_sim /src/adapter
+RUN cmake -S /src/adapter -B /build -DFASTLIO_DIR=/src/fastlio \
+    && cmake --build /build --parallel 3
+
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install --no-install-recommends -y \
+      libgomp1 libpcl-common1.14 libpcl-filters1.14 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/luxi_fastlio2_sim /usr/local/bin/luxi_fastlio2_sim
+ENTRYPOINT ["/usr/local/bin/luxi_fastlio2_sim"]

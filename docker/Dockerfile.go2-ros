@@ -1,0 +1,85 @@
+ARG ROS_IMAGE=ros:humble-ros-base-jammy
+FROM ${ROS_IMAGE} AS fastlio-builder
+
+ARG FASTLIO_REPOSITORY=https://github.com/dimensionalOS/dimos-module-fastlio2.git
+ARG FASTLIO_COMMIT=a32c9f599940a94595aa72868e2e4ab436a44b75
+ARG UBUNTU_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+ARG UBUNTU_PORTS_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+ARG ROS_APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN sed -i \
+        -e "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
+        -e "s|http://security.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
+        -e "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" \
+        /etc/apt/sources.list \
+    && sed -i "s|http://packages.ros.org/ros2/ubuntu|${ROS_APT_MIRROR}|g" \
+        /etc/apt/sources.list.d/ros2.sources \
+    && sed -i "s/^Types: deb deb-src$/Types: deb/" \
+        /etc/apt/sources.list.d/ros2.sources \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        libeigen3-dev \
+        libpcl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --filter=blob:none "${FASTLIO_REPOSITORY}" /src/fastlio \
+    && git -C /src/fastlio checkout "${FASTLIO_COMMIT}" \
+    && test "$(git -C /src/fastlio rev-parse HEAD)" = "${FASTLIO_COMMIT}"
+
+COPY native/fastlio2_sim /src/adapter
+RUN cmake -S /src/adapter -B /build -DFASTLIO_DIR=/src/fastlio \
+    && cmake --build /build --parallel 3
+
+
+FROM ${ROS_IMAGE}
+
+ARG LUXI_UID=1000
+ARG LUXI_GID=1000
+ARG UBUNTU_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+ARG UBUNTU_PORTS_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+ARG ROS_APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONPATH=/opt/luxi \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    ROS_DOMAIN_ID=31 \
+    ROS_LOCALHOST_ONLY=0
+
+RUN sed -i \
+        -e "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
+        -e "s|http://security.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
+        -e "s|http://ports.ubuntu.com/ubuntu-ports|${UBUNTU_PORTS_MIRROR}|g" \
+        /etc/apt/sources.list \
+    && sed -i "s|http://packages.ros.org/ros2/ubuntu|${ROS_APT_MIRROR}|g" \
+        /etc/apt/sources.list.d/ros2.sources \
+    && sed -i "s/^Types: deb deb-src$/Types: deb/" \
+        /etc/apt/sources.list.d/ros2.sources \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libgomp1 \
+        libpcl-common1.12 \
+        libpcl-filters1.12 \
+        python3-numpy \
+        python3-scipy \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${LUXI_GID}" luxi \
+    && useradd --uid "${LUXI_UID}" --gid "${LUXI_GID}" \
+        --home-dir /home/luxi --create-home --shell /bin/bash luxi
+
+COPY --from=fastlio-builder /build/luxi_fastlio2_sim /usr/local/bin/luxi_fastlio2_sim
+COPY harness /opt/luxi/harness
+COPY docker/go2-ros-entrypoint.sh /usr/local/bin/go2-ros-entrypoint
+
+RUN chmod 0755 /usr/local/bin/go2-ros-entrypoint \
+    && install -d -o luxi -g luxi /home/luxi/.ros
+
+WORKDIR /opt/luxi
+USER luxi:luxi
+
+ENTRYPOINT ["/usr/local/bin/go2-ros-entrypoint"]
+CMD ["python3", "-m", "harness.robots.go2.ros.go2_ros_robot_node"]

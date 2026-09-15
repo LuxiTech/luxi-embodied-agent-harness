@@ -1,0 +1,76 @@
+name: luxi-dimos
+
+services:
+  dimos:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        BASE_IMAGE: ${DIMOS_BASE_IMAGE:-ubuntu:24.04}
+        DIMOS_UID: ${DIMOS_UID:-1000}
+        DIMOS_GID: ${DIMOS_GID:-1000}
+    image: ${DIMOS_IMAGE:-luxi-dimos:0.0.13-post1}
+    command:
+      - g1-tools
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024
+    shm_size: 1gb
+    stop_grace_period: 25s
+    gpus: all
+    environment:
+      DIMOS_LCM_URL: udpm://239.255.76.67:17667?ttl=0
+      LISTEN_HOST: 0.0.0.0
+      MCP_PORT: 9990
+      LUXI_QWEN_API_KEY_FILE: /run/luxi-secrets/qwen.key
+      LUXI_QWEN_BASE_URL: ${LUXI_QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LUXI_QWEN_MODEL: ${LUXI_QWEN_MODEL:-qwen3.7-max}
+      LUXI_DIMOS_VLM_MODEL: ${LUXI_DIMOS_VLM_MODEL:-qwen3.7-plus}
+      LUXI_MUJOCO_HEADLESS: "1"
+      MUJOCO_GL: egl
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      MKL_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    ports:
+      - 127.0.0.1:${DIMOS_MCP_PORT:-9990}:9990
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+      - /run:rw,noexec,nosuid,nodev,size=32m,mode=755
+    volumes:
+      - ${LUXI_QWEN_KEY_FILE:-/dev/null}:/run/luxi-secrets/qwen.key:ro
+      - dimos-cache:/opt/dimos/cache
+      - dimos-config:/opt/dimos/runtime/config
+      - dimos-data:/opt/dimos/runtime/data
+      - dimos-state:/opt/dimos/runtime/state
+      - dimos-sim-control:/opt/dimos/runtime/luxi-sim-control
+      - dimos-logs:/opt/dimos/upstream/logs
+      - dimos-memory:/opt/dimos/upstream/assets/output
+    healthcheck:
+      test:
+        - CMD
+        - /opt/dimos/runtime/.venv/bin/python
+        - -c
+        - >-
+          import socket;
+          connection = socket.create_connection(('127.0.0.1', 9990), timeout=3);
+          connection.close()
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 180s
+
+volumes:
+  dimos-cache:
+  dimos-config:
+  dimos-data:
+  dimos-state:
+  dimos-sim-control:
+  dimos-logs:
+  dimos-memory:

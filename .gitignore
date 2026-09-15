@@ -1,0 +1,93 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config/dimos.local.env
+*.pem
+*.key
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.runtime/
+MUJOCO_LOG.TXT
+/requirements-dev.txt
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+
+# Large generated artifacts and model data
+checkpoints/
+models/
+outputs/
+runs/
+wandb/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# Local comparison checkouts. Record provenance in docs, not nested source trees.
+reference/project/
+reference/luxi-embodied-agent-qingyue/
+
+# Local development history and non-runtime reference material
+/.scratch/
+/.agents/
+/.codex/
+/reference/document/
+/CONTEXT.MD
+*.pid
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Development documents and tests are not part of the public source package
+/docs/
+/tests/
+/AGENTS.md
+/CONTEXT.md
+/pytest.ini
+/.github/
+
+# Publish only runtime launchers and their shared dependencies.
+/scripts/*
+!/scripts/bootstrap_dimos.sh
+!/scripts/build_go2_fastlio2.sh
+!/scripts/composed_dashboard.py
+!/scripts/dimos.sh
+!/scripts/dimos_with_observer.py
+!/scripts/doctor_dimos.sh
+!/scripts/isaac_g1.sh
+!/scripts/luxi-ui.sh
+!/scripts/mcp_job.py
+!/scripts/preflight_dimos.sh
+!/scripts/restart_isaac_follow.sh
+!/scripts/send_g1_velocity.py
+!/scripts/lib/
+/scripts/lib/*
+!/scripts/lib/dimos_env.sh
+!/scripts/lib/isaac_env.sh
+!/scripts/lib/runtime_guard.sh

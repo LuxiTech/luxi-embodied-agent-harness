@@ -1,0 +1,7 @@
+{
+  "instruction": "把杯子 cup 放进柜子 cabinet，并关好柜门。",
+  "goals": [
+    {"predicate": "inside", "subject": "cup", "target": "cabinet"},
+    {"predicate": "open", "subject": "cabinet", "expected": false}
+  ]
+}

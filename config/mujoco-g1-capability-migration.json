@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "backend": "mujoco",
+  "reviewed_at": "2026-09-04",
+  "capabilities": {
+    "approach_visual_target": {
+      "decision": "migrate",
+      "status": "accepted",
+      "priority": 1,
+      "reason": "terminal RGB-D approach already returns planner, post-stop verification and stationarity evidence",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "approach_person": {
+      "decision": "migrate",
+      "status": "accepted",
+      "priority": 2,
+      "reason": "terminal person approach has the same physical evidence boundary but depends on a person-enabled scene",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "fetch_object": {
+      "decision": "migrate",
+      "status": "accepted",
+      "priority": 3,
+      "reason": "terminal fetch has contact, attachment, destination arrival and stationary evidence but carries the largest side-effect surface",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "explore_frontiers": {
+      "decision": "migrate",
+      "status": "accepted",
+      "replacement_for": "explore_briefly",
+      "reason": "terminal known-free frontier exploration passed 3/3 cold starts and the complete cancellation, timeout, disconnect and crash-reconciliation gate",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "navigate_with_text": {
+      "decision": "migrate",
+      "status": "accepted",
+      "reason": "the legacy bounded activity was replaced by an evidence-backed terminal exact-tag/visual/memory/frontier Skill and passed all cutover gates",
+      "evidence_note": "Historical acceptance reports are not distributed in this source release; configured capability status is retained."
+    },
+    "explore_briefly": {
+      "decision": "retire",
+      "replacement": "explore_frontiers",
+      "reason": "duration elapsed is not exploration completion evidence"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "task_key": "pose-example",
+  "instruction": "到指定位置，再转向指定方向并停稳。",
+  "destination": [-2.8, -1.75, 0.4]
+}

@@ -1,0 +1,103 @@
+name: luxi-go2-ros
+
+x-go2-ros-common: &go2-ros-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.go2-ros
+    args:
+      ROS_IMAGE: ${LUXI_GO2_ROS_IMAGE:-ros:humble-ros-base-jammy}
+      LUXI_UID: ${LUXI_UID:-1000}
+      LUXI_GID: ${LUXI_GID:-1000}
+      UBUNTU_MIRROR: ${LUXI_UBUNTU_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/ubuntu}
+      UBUNTU_PORTS_MIRROR: ${LUXI_UBUNTU_PORTS_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports}
+      ROS_APT_MIRROR: ${LUXI_ROS_APT_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu}
+  image: ${LUXI_GO2_ROS_RUNTIME_IMAGE:-luxi-go2-ros:humble}
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 512
+  stop_grace_period: 10s
+  environment: &go2-ros-environment
+    ROS_DOMAIN_ID: ${LUXI_ROS_DOMAIN_ID:-31}
+    ROS_LOCALHOST_ONLY: "0"
+    LUXI_FASTLIO2_MODE: local
+    LUXI_FASTLIO2_EXECUTABLE: luxi_fastlio2_sim
+  networks:
+    - ros-single
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    - /home/luxi/.ros:rw,noexec,nosuid,nodev,size=16m,uid=${LUXI_UID:-1000},gid=${LUXI_GID:-1000},mode=700
+  healthcheck:
+    test:
+      - CMD
+      - python3
+      - -c
+      - >-
+        import json, pathlib, time;
+        value=json.loads(pathlib.Path('/tmp/luxi-go2-ros-status.json').read_text());
+        assert time.time()-float(value['written_at']) < 2.0;
+        assert value['ros_distro']=='humble';
+        assert value['adapter_connected'] is True;
+        assert value['motion_enabled'] is True
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 15s
+
+services:
+  mujoco-adapter:
+    image: ${LUXI_GO2_ROS_RUNTIME_IMAGE:-luxi-go2-ros:humble}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${LUXI_ROS_DOMAIN_ID:-31}
+      ROS_LOCALHOST_ONLY: "0"
+    networks:
+      - ros-single
+    volumes:
+      - ${LUXI_GO2_RUNTIME_DIR:-${HOME}/work/Asset/dimos/runtime/luxi-go2-ui}:/runtime:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+      - /home/luxi/.ros:rw,noexec,nosuid,nodev,size=16m,uid=${LUXI_UID:-1000},gid=${LUXI_GID:-1000},mode=700
+    command: ["python3", "-m", "harness.robots.go2.ros.go2_ros_sim_adapter", "--runtime-root", "/runtime"]
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import json, pathlib, time;
+          value=json.loads(pathlib.Path('/tmp/luxi-go2-sim-adapter-status.json').read_text());
+          assert time.time()-float(value['written_at']) < 2.0;
+          assert all(float(value['last_state_write'][robot]) > 0 for robot in ('go2-01',))
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  go2-01:
+    <<: *go2-ros-common
+    hostname: go2-01
+    environment:
+      <<: *go2-ros-environment
+      LUXI_ROBOT_ID: go2-01
+    command: ["python3", "-m", "harness.robots.go2.ros.go2_ros_robot_node", "--robot-id", "go2-01"]
+    depends_on:
+      mujoco-adapter:
+        condition: service_healthy
+
+
+networks:
+  ros-single:
+    driver: bridge

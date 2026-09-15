@@ -1,0 +1,71 @@
+{
+  "scene_id": "home_complex",
+  "source": "operator_annotation",
+  "revision": "home-places-v3",
+  "locations": {
+    "kitchen": {
+      "aliases": [
+        "厨房"
+      ],
+      "observation_pose": [
+        0.8,
+        0.2,
+        0.0
+      ],
+      "search_radius_m": 2.5,
+      "approach_yaw": 1.5707963267948966
+    }
+  },
+  "surfaces": {
+    "living_room_table": {
+      "aliases": [
+        "客厅桌子",
+        "客厅的桌子",
+        "客厅桌面",
+        "客厅茶几"
+      ],
+      "frame": "world",
+      "robot_pose": [
+        -2.05,
+        -2.15,
+        -1.5707963267948966
+      ],
+      "place_point": [
+        -2.05,
+        -3.0,
+        0.56
+      ],
+      "bounds_xy": [
+        -2.55,
+        -1.55,
+        -3.41,
+        -2.89
+      ]
+    },
+    "kitchen_return_point": {
+      "aliases": [
+        "厨房原位置",
+        "厨房原位",
+        "厨房放物点",
+        "厨房固定归还点"
+      ],
+      "frame": "world",
+      "robot_pose": [
+        1.91,
+        0.505,
+        1.5707963267948966
+      ],
+      "place_point": [
+        2.05,
+        1.15,
+        0.9
+      ],
+      "bounds_xy": [
+        1.17,
+        2.93,
+        1.11,
+        2.13
+      ]
+    }
+  }
+}
