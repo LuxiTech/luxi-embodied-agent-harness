@@ -8,34 +8,6 @@ from pathlib import Path
 import sys
 from typing import Mapping, Sequence
 
-from dimos.robot.unitree import mujoco_connection
-from dimos.robot.cli.dimos import cli_main
-
-from harness.integrations.dimos.navigation_compat import install_navigation_compat
-from harness.integrations.dimos.local_blueprints import register_luxi_blueprints
-from harness.integrations.mcp.mcp_client_compat import install_mcp_client_timeout_compat
-from harness.integrations.dimos.object_navigation_compat import install_object_navigation_compat
-from harness.integrations.qwen.qwen_vl_compat import install_qwen_vl_compat
-from harness.integrations.dimos.spatial_memory_compat import install_spatial_memory_location_compat
-from harness.evaluation.blind_evaluation import reject_forbidden_blind_cli_args
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-mujoco_connection.LAUNCHER_PATH = (
-    PROJECT_ROOT / "harness/robots/g1/mujoco/mujoco_observer_launcher.py"
-)
-install_navigation_compat()
-install_mcp_client_timeout_compat()
-install_object_navigation_compat()
-install_qwen_vl_compat()
-install_spatial_memory_location_compat()
-
-# Register import paths only. The CLI applies its global options before it
-# resolves and imports the selected blueprint, so --viewer/--rerun-open are
-# honored by the nested upstream blueprint factories.
-register_luxi_blueprints()
-
-
 def _argv_with_operator_scene_start(
     argv: Sequence[str],
     environment: Mapping[str, str],
@@ -74,7 +46,56 @@ def _argv_with_operator_scene_start(
     return result
 
 
-if __name__ == "__main__":
+def _configure_cli():
+    # Keep CLI installation out of module import so scene-argument helpers can
+    # also be used by callers that already imported the upstream simulation.
+    from harness.integrations.dimos.mujoco_assets_compat import install_mujoco_asset_compat
+
+    install_mujoco_asset_compat()
+
+    from dimos.robot.unitree import mujoco_connection
+    from dimos.robot.cli.dimos import cli_main
+
+    from harness.integrations.dimos.navigation_compat import install_navigation_compat
+    from harness.integrations.dimos.local_blueprints import register_luxi_blueprints
+    from harness.integrations.mcp.mcp_client_compat import install_mcp_client_timeout_compat
+    from harness.integrations.dimos.object_navigation_compat import install_object_navigation_compat
+    from harness.integrations.qwen.qwen_vl_compat import install_qwen_vl_compat
+    from harness.integrations.dimos.spatial_memory_compat import install_spatial_memory_location_compat
+
+
+    project_root = Path(__file__).resolve().parent.parent
+    mujoco_connection.LAUNCHER_PATH = (
+        project_root / "harness/robots/g1/mujoco/mujoco_observer_launcher.py"
+    )
+    install_navigation_compat()
+    install_mcp_client_timeout_compat()
+    install_object_navigation_compat()
+    install_qwen_vl_compat()
+    install_spatial_memory_location_compat()
+
+    # Register import paths only. The CLI applies its global options before it
+    # resolves and imports the selected blueprint, so --viewer/--rerun-open are
+    # honored by the nested upstream blueprint factories.
+    register_luxi_blueprints()
+
+    return cli_main
+
+
+def main():
+    cli_main = _configure_cli()
+    from harness.evaluation.blind_evaluation import reject_forbidden_blind_cli_args
+
     sys.argv[:] = _argv_with_operator_scene_start(sys.argv, os.environ)
     reject_forbidden_blind_cli_args(sys.argv, os.environ)
-    raise SystemExit(cli_main())
+    return cli_main()
+
+
+if __name__ == "__mp_main__":
+    # forkserver/spawn workers must select the same wrapper and compatibility
+    # imports as the parent, before deserializing upstream robot modules.
+    _configure_cli()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

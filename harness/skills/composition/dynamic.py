@@ -237,10 +237,19 @@ def execute(owner, request, cancel, state):
             return result('tool_denied', ok=False)
         stop = owner.safety.stop(request.robot_id, 'composition_handoff')
         observation = owner.backend.observe()
-        if not stop.stationary_confirmed or stop.stationary_confirmed_at is None or not _fresh(observation, stop.stationary_confirmed_at) or not at(observation, target):
+        if not stop.stationary_confirmed or stop.stationary_confirmed_at is None or not _fresh(observation, stop.stationary_confirmed_at):
             return result('verification_failed', ok=False)
         if task.world_revision and observation.get('world_revision') != task.world_revision:
             return result('side_effect_unknown', ok=False)
+        if not at(observation, target):
+            if name == 'compose_attach':
+                current, _ = goal_evidence(task, observation, state)
+                return result('verification_failed', ok=False, payload={
+                    'reason': '必须先导航到取物点：当前位姿尚未满足拿取要求；定位成功不代表已到位。请先调用 compose_navigate，target 使用当前拿取目标的 target，goal_id 使用该 holding/acquired 目标的 ID，不要使用 visited 目标的 ID；导航成功后再 compose_attach。',
+                    'observation': observation,
+                    **goal_feedback(task, observation, current, state),
+                })
+            return result('verification_failed', ok=False)
         attached = observation.get('attached_entity')
         if (name == 'compose_attach' and attached is not None) or (name in {'compose_release', 'compose_place'} and attached != condition['entity_id']):
             return result('tool_denied', ok=False)

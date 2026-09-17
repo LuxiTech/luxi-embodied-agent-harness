@@ -619,4 +619,5 @@ class LuxiAgentLoop:
                 planning_steps,
                 tool_calls,
                 last_result,
+                error=str(exc)[:1_000],
             )

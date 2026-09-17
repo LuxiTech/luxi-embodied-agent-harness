@@ -269,6 +269,36 @@ class LuxiRobotRuntimeHost:
             )
             return None
 
+    def confirm_restart_stationary(self) -> None:
+        """Recover safety admission only through a fresh physical stop barrier."""
+        if self.reconcile().state is not RuntimeState.READY:
+            raise RuntimeError("Runtime is not ready for restart stop verification")
+        evidence = self._request_emergency_stop("runtime_restart_verification")
+        # Isaac's stop service returns a legacy result envelope; MuJoCo's
+        # bound kernel returns SafetyEvidence directly.
+        details = evidence.get("safety_evidence", {}) if isinstance(evidence, Mapping) else {
+            name: getattr(evidence, name, None) for name in (
+                "stop_command_completed", "stationary_confirmed",
+                "stop_command_completed_at", "stationary_confirmed_at", "details",
+            )
+        }
+        if not isinstance(details, Mapping):
+            details = {}
+        confirmed = (details.get("stop_command_completed") is True
+                     and details.get("stationary_confirmed") is True)
+        self._emit("runtime/restart_stop_verified", {
+            "boot_epoch": self.boot_epoch,
+            "stationary_confirmed": confirmed,
+            "stop_command_completed": details.get("stop_command_completed") is True,
+            "stop_command_completed_at": details.get("stop_command_completed_at"),
+            "stationary_confirmed_at": details.get("stationary_confirmed_at"),
+            "details": details.get("details") or {},
+        })
+        if not confirmed:
+            raise RuntimeError("新仿真停稳验证失败，安全故障未解除")
+        if self.reconcile().state is not RuntimeState.READY:
+            raise RuntimeError("Runtime health changed during restart stop verification")
+
     def _start_watchdog(self) -> None:
         if not self.watchdog_enabled:
             return

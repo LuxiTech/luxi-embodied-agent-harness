@@ -1171,6 +1171,9 @@ class _ObservedViewerContext:
 
 
 def main() -> None:
+    from harness.integrations.dimos.mujoco_assets_compat import install_mujoco_asset_compat
+
+    install_mujoco_asset_compat()
     from harness.robots.g1.mujoco.g1_idle_stabilizer import install_g1_idle_stabilizer
 
     install_g1_idle_stabilizer()

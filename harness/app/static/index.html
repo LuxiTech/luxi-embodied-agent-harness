@@ -182,7 +182,7 @@
 
         <div class="agent-response" id="agent-response" aria-live="polite">
           <div class="response-empty">
-            <span id="agent-link-label">AGENT LINK READY</span>
+            <span id="agent-link-label">HARNESS · 正在连接</span>
             <p>输入自然语言指令。代理会观测、调用 DimOS 工具并把过程记录在下方时间线。</p>
           </div>
         </div>
@@ -203,7 +203,8 @@
         <form id="command-form" class="command-form">
 
           <label for="execution-mode">任务执行方式</label>
-          <select id="execution-mode">
+          <select id="execution-mode" disabled>
+            <option value="" selected disabled>正在读取任务能力…</option>
             <option value="terminal">预定义任务</option>
             <option value="composed" disabled>自主组合（当前后端未开放）</option>
           </select>
@@ -223,10 +224,11 @@
           ></textarea>
           <div class="command-actions">
             <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</span>
-            <button type="submit" id="send-command">
-              <span id="agent-submit-label">交给 Agent</span><i aria-hidden="true">↗</i>
+            <button type="submit" id="send-command" disabled>
+              <span id="agent-submit-label">交给 Harness</span><i aria-hidden="true">↗</i>
             </button>
           </div>
+          <p id="command-feedback" role="status" aria-live="polite">正在连接控制台，获取机器人状态…</p>
         </form>
       </section>
 

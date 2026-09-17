@@ -16,6 +16,10 @@ goal.visual_regions 是可信搜索地点目录，kitchen/厨房是地点；水/
 compose_locate 关联 holding 目标和定位步骤；先到厨房，定位成功后 compose_navigate 仍传 target=kitchen、goal_id=holding的ID，运行时自动使用视觉取物位姿。
 每项只依赖必要的前置步骤：定位依赖到厨房，接近依赖定位，附着依赖接近，返回依赖附着。不要让附着依赖仍在厨房入口的 pose 条件。
 也允许定位、导航和附着放在同一个 goal/holding 步骤内顺序调用。不要在没有视觉绑定时直接导航或附着。
+拿取顺序约束（同时适用于 holding 和 acquired，包括把多个动作合并在同一计划步骤的情况）：
+compose_locate 成功只表示已定位，机器人仍可能在厨房观察点；下一步必须先 compose_navigate 到该拿取目标的取物位姿，不能直接 compose_attach。
+导航使用拿取目标的 goal_id（如 a1），target 仍为 kitchen；不要使用 visited 的 goal_id（如 v1），否则只会导航回厨房入口。subgoal_index 使用当前计划中对应的接近或合并拿取步骤。
+只有该取物导航成功、当前 goal_details 中 position 和 heading 均已满足，才调用 compose_attach；object_evidence 未满足正是随后拿取要完成的条件。若返回“必须先导航到取物点”，先完成该目标的 compose_navigate，再拿取；导航失败时不得继续附着。
 定位结果不是已持物；附着复用现有 sim_attachment 服务，检查当前到位停稳、对象可用及操作范围，不额外进行视觉精度验收。重新定位、过期或世界变化后旧定位/到位回执不能继续使用。
 搜索失败、无可靠深度、区域外目标或路径受阻必须保留具体失败。当前不支持任意地点、任意物体、未标注表面的放置和接触抓取。
 只使用本模式提供的工具，禁止调用预设模式技能或发明新工具。每次至多调用一个工具。

@@ -325,6 +325,7 @@ class SharedMemoryProbe:
         self.manifest_path = manifest_path
         self._cache: dict[int, tuple[float, list[Path]]] = {}
         self._manifest_cache: tuple[float, dict[str, str]] | None = None
+        self._video_progress: tuple[str, int, float] | None = None
         self._lock = threading.Lock()
 
     def _manifest_channels(self) -> dict[str, str]:
@@ -396,6 +397,7 @@ class SharedMemoryProbe:
         with self._lock:
             self._cache.clear()
             self._manifest_cache = None
+            self._video_progress = None
 
     @staticmethod
     def _read(path: Path, expected_size: int) -> bytes | None:
@@ -441,8 +443,34 @@ class SharedMemoryProbe:
         return None
 
     def camera_path(self) -> Path | None:
+        # The worker increments seq[0] only after publishing RGB. A newly
+        # allocated video buffer is not a frame (and a real black frame is valid).
+        channels = self._manifest_channels() if self.manifest_path is not None else {}
+        has_sequence = "seq" in channels
+        if has_sequence:
+            seq_paths = self._paths_for_channel("seq", 8 * 8)
+            raw = self._read(seq_paths[0], 8 * 8) if seq_paths else None
+            if raw is None:
+                return None
+            sequence = struct.unpack_from("=q", raw)[0]
+            if sequence <= 0:
+                return None
+            identity = channels["seq"]
+            now = time.monotonic()
+            with self._lock:
+                previous = self._video_progress
+                if previous is None or previous[:2] != (identity, sequence):
+                    self._video_progress = (identity, sequence, now)
+                elif now - previous[2] > 2.5:
+                    return None
         for path in self._paths_for_channel("video", CAMERA_BYTES):
-            if path.exists():
+            if has_sequence and path.exists():
+                return path
+            # Older manifests have no sequence channel. Do not promote their
+            # zero-filled allocation to a ready camera; never discover a foreign
+            # sequence buffer by size (odom has the same byte size).
+            payload = self._read(path, CAMERA_BYTES)
+            if payload is not None and any(payload):
                 return path
         return None
 
@@ -3047,6 +3075,9 @@ class ExperimentResetController:
             if self.auxiliary_lifecycle is not None:
                 self.auxiliary_lifecycle.start()
             self._wait_ready(reset_started_epoch)
+            self._check_cancelled()
+            if self.runtime_host is not None:
+                self.runtime_host.confirm_restart_stationary()
             # A critical observation from the old process can race the first
             # reset above.  Clear both holds only after fresh pose, lidar, and
             # mapping evidence from the replacement simulation are ready.
@@ -3338,6 +3369,7 @@ class LuxiApplication:
         start_sim: bool,
         *,
         backend: str | None = None,
+        composition_options: dict[str, Any] | None = None,
     ) -> None:
         self.asset_root = asset_root
         self.port = port
@@ -3860,6 +3892,7 @@ class LuxiApplication:
             safety=self.stop_service.safety if self.stop_service else None,
             native_broker=self.native_tool_broker,
             native_motion_port=stop_gateway.port if self.backend == "isaac-g1" and self.stop_service else None,
+            **(composition_options or {}),
         )
         if self.operator_motion_gateway is not None:
             self.operator_motion_gateway.motion_port = self.robot_runtime.adapter.ports.motion
@@ -4975,7 +5008,7 @@ class LuxiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'")
         self.end_headers()
         if include_body:
             self.wfile.write(body)
@@ -5021,6 +5054,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-start-sim", action="store_true", help="Do not start DimOS automatically")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the dashboard")
+    parser.add_argument("--task", type=Path, action="append", default=[], help="Add a fixed MuJoCo composed task")
+    parser.add_argument("--locations", type=Path, help="Trusted name -> [x,y,yaw] references for composed tasks")
     return parser
 
 
@@ -5035,16 +5070,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         print("Port must be between 1 and 65535.", file=sys.stderr)
         return 2
 
+    from harness.runtime.composition import dashboard_composition
+    with dashboard_composition(backend=args.backend, project_root=PROJECT_ROOT,
+                               task_paths=args.task, locations_path=args.locations) as options:
+        return serve_dashboard(args, options)
+
+
+def serve_dashboard(args, composition_options) -> int:
     app = LuxiApplication(
         args.asset_root.resolve(),
         args.port,
         not args.no_start_sim,
         backend=args.backend,
+        composition_options=composition_options,
     )
     try:
         server = LuxiHTTPServer((args.host, args.port), app)
     except OSError as error:
         print(f"Could not listen on {args.host}:{args.port}: {error}", file=sys.stderr)
+        app.close()
         return 1
 
     stop_once = threading.Event()

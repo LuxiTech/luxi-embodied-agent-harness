@@ -681,7 +681,7 @@ def write_blind_shared_memory_manifest(
 
     prepared = open_prepared_blind_run(runtime_root, run_token)
     channels: dict[str, str] = {}
-    for channel in _AGENT_SHARED_MEMORY_CHANNELS:
+    for channel in (*_AGENT_SHARED_MEMORY_CHANNELS, *(["seq"] if "seq" in names else [])):
         name = names.get(channel)
         if not isinstance(name, str) or _SHARED_MEMORY_NAME_PATTERN.fullmatch(name) is None:
             raise ValueError(

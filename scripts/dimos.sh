@@ -23,7 +23,7 @@ usage() {
   go2-fastlio-build  构建 MuJoCo MID-360 使用的固定版 FAST-LIO2 原生镜像
   g1-isaac-tools    Isaac G1 共享 MCP 工具服务
   blind-eval      按 --scene/--seed 启动信息隔离的未知场景 UI
-  ui              启动 Luxi 本地操作台，并按需托管 g1-tools 仿真
+  ui              启动统一操作台（MuJoCo G1 默认支持自主组合）
   record ...      录制同步的轨迹地图回放和 G1 第一人称 MP4
   move ...        给运行中的 G1 仿真发送限速、定时速度脉冲
   mcp ...         透传 dimos mcp 子命令
@@ -57,6 +57,9 @@ fi
 shift
 
 case "${command_name}" in
+    ui)
+        exec "${ROOT}/scripts/luxi-ui.sh" "$@"
+        ;;
     bootstrap)
         exec "${ROOT}/scripts/bootstrap_dimos.sh" "$@"
         ;;
@@ -205,10 +208,6 @@ case "${command_name}" in
         require_foreground "$@"
         export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
         exec "${VIRTUAL_ENV}/bin/python" -m harness.evaluation.blind_evaluation "$@"
-        ;;
-    ui)
-        export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-        exec "${VIRTUAL_ENV}/bin/python" -m harness.app.server "$@"
         ;;
     record)
         export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"

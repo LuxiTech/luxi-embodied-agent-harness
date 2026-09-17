@@ -7,7 +7,7 @@ import re
 
 def write_manifest(path, names):
     channels = {}
-    for channel in ('odom', 'cmd', 'video'):
+    for channel in ('odom', 'cmd', 'video', *(['seq'] if isinstance(names, dict) and 'seq' in names else [])):
         name = names.get(channel) if isinstance(names, dict) else None
         if not isinstance(name, str) or re.fullmatch(r'psm_[A-Za-z0-9_]+', name) is None:
             raise ValueError(f'invalid shared-memory channel {channel}')

@@ -97,6 +97,12 @@ sudo sysctl -w net.core.rmem_default=67108864
 
 `doctor` 应显示版本、Python 导入、模型资产和 G1 blueprint 检查通过。它验证安装完整性，不代表机器人任务已完成。
 
+MuJoCo 控制台启动只读取已安装的本地资产，不会自动下载；缺失时按报错提示运行
+`DIMOS_FETCH_SIM_ASSETS=1 ./scripts/bootstrap_dimos.sh`。连接进程和画面子进程使用项目内
+轻量资产接口，避免仅为读取资产而导入 Playground 的训练依赖；上游固定版本源码、
+模型和控制器保持不变。两路相机独立重试，图片实际加载成功后才撤下等待提示，
+后台标签页降低画面刷新频率。
+
 ### 4. 启动机器人与操作台
 
 先运行基础仿真：
@@ -111,6 +117,7 @@ sudo sysctl -w net.core.rmem_default=67108864
 ./scripts/luxi-ui.sh
 ```
 
+MuJoCo G1 默认启动自主组合候选操作台，并默认选中“自主组合”。输入任务后先确认生成的目标，再执行规划。需要预定义任务时在页面切换执行方式，无需重启。Go2 和 Isaac 使用同一入口，但尚未开放组合能力。
 
 ### 5. 配置自然语言任务
 
@@ -152,11 +159,10 @@ export LUXI_DIMOS_VLM_MODEL="qwen3.7-plus"
 
 ### 动态组合模式
 
-完成默认安装和模型配置后，先停止普通操作台，再运行：
+统一入口为 MuJoCo G1 装配动态组合能力。停止现有操作台后，可显式指定后端和端口：
 
 ```bash
-source scripts/lib/dimos_env.sh
-python scripts/composed_dashboard.py --backend mujoco --port 8787 --no-browser
+./scripts/luxi-ui.sh --backend mujoco --port 8787 --no-browser
 ```
 
 

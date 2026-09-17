@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Mapping
 
 from .capabilities import AgentScopeResolver, LuxiCapabilityRegistry
@@ -12,6 +14,58 @@ from .contracts import (
     SideEffect,
 )
 from .tool_pipeline import LuxiToolRegistry
+
+
+@contextmanager
+def dashboard_composition(*, backend, project_root, task_paths=(), locations_path=None):
+    """Own dashboard composition configuration and its per-run sensor manifest.
+
+    MuJoCo G1 uses the existing candidate contract; other backends and blind
+    evaluation retain their accepted tools. No production gate is promoted.
+    """
+    import json
+    import os
+    import tempfile
+    blind = os.environ.get("LUXI_BLIND_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if backend != "mujoco" or blind:
+        if task_paths or locations_path:
+            raise ValueError("组合任务和位置配置仅支持非盲测 MuJoCo G1")
+        yield {}
+        return
+    from .composition_goals import pose_value
+    from .task_state import ComposedTask
+    from .composed_backend import mujoco_candidate_backend
+
+    locations = ({k: pose_value(v) for k, v in json.loads(Path(locations_path).read_text()).items()}
+                 if locations_path else {})
+    tasks = {}
+    for path in task_paths:
+        task = ComposedTask.from_payload(json.loads(Path(path).read_text()))
+        if task.release or task.entity_id not in (None, "water_bottle"):
+            raise ValueError("固定组合任务只支持位置任务和 water_bottle 附着运输")
+        if task.task_key in tasks:
+            raise ValueError("task_key 必须唯一")
+        tasks[task.task_key] = task
+
+    def make_backend(skills):
+        value = mujoco_candidate_backend(skills)
+        value.references = locations
+        value.location_catalog_path = Path(project_root) / "config/composed/home_complex-locations.json"
+        return value
+
+    keys = ("LUXI_COMPOSED_DEV", "LUXI_SIM_ATTACHMENT_DEV", "LUXI_COMPOSED_SHM_MANIFEST")
+    previous = {key: os.environ.get(key) for key in keys}
+    with tempfile.TemporaryDirectory(prefix="luxi-composed-") as directory:
+        try:
+            os.environ.update(LUXI_COMPOSED_DEV="1", LUXI_SIM_ATTACHMENT_DEV="1",
+                              LUXI_COMPOSED_SHM_MANIFEST=str(Path(directory) / "shm.json"))
+            yield {"composed_backend": make_backend, "composed_tasks": tasks}
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 READ_ONLY_TOOLS = frozenset(

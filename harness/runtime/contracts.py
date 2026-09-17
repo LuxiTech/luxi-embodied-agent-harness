@@ -247,6 +247,7 @@ class LoopResult:
     planning_steps: int
     tool_calls: int
     last_tool_result: ToolResult | None = None
+    error: str = ""
 
 
 class CancellationToken:

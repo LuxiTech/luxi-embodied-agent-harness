@@ -6,8 +6,8 @@ const state = {
   cursor: 0,
   events: [],
   filter: "all",
-  cameraTimer: null,
-  observerTimer: null,
+  cameraStream: null,
+  observerStream: null,
   toastTimer: null,
   resetWasActive: false,
   sceneCatalogKey: "",
@@ -17,6 +17,10 @@ const state = {
   manualCommandPending: false,
   manualTimer: null,
   lastManualErrorAt: 0,
+  commandPending: false,
+  commandError: "",
+  statePollPending: false,
+  eventsPollPending: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -50,17 +54,46 @@ function showToast(message, error = false) {
 
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, { cache: "no-store", ...options });
-  let payload = {};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
   try {
-    payload = await response.json();
-  } catch (_error) {
-    payload = { error: `HTTP ${response.status}` };
-  }
-  if (!response.ok) {
-    throw new Error(payload.error || payload.message || `HTTP ${response.status}`);
-  }
-  return payload;
+    const response = await fetch(url, { cache: "no-store", ...options, signal: controller.signal });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw new Error(`控制台返回了无效响应（HTTP ${response.status}）`);
+    }
+    if (!response.ok) {
+      throw new Error(payload.error || payload.message || `HTTP ${response.status}`);
+    }
+    return payload;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error(options.method === "POST"
+      ? "请求超时，受理结果未知。请等待任务状态更新，不要重复提交。"
+      : "控制台状态请求超时，请检查服务是否正常运行。");
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
+function commandFeedback(message, error = false) {
+  const element = $("#command-feedback");
+  element.textContent = message;
+  element.classList.toggle("error", error);
+}
+
+function updateCommandFeedback(agent, runtime) {
+  if (state.commandPending) return;
+  if (agent.busy) commandFeedback(agent.execution_mode === "composed"
+    ? "Harness 正在处理组合任务；生成目标后会在此显示确认按钮。"
+    : "Harness 正在处理任务，执行过程见下方记录。");
+  else if (agent.proposed_goal) commandFeedback("目标已生成，请核对上方目标并点击“确认目标并执行”。");
+  else if (agent.last_error) commandFeedback(`任务失败：${agent.last_error}`, true);
+  else if (state.commandError) commandFeedback(state.commandError, true);
+  else if (runtime && runtime.state !== "READY") commandFeedback(`机器人状态：${runtime.state}，暂不能提交任务。`, true);
+  else if (agent.last_task_result?.task_status) commandFeedback(`最近任务：${agent.last_task_result.task_status}。${agent.last_response || ""}`);
+  else commandFeedback("已连接 Harness，可以提交任务。组合任务需先确认目标。");
 }
 
 function updateSnapshot(snapshot) {
@@ -198,7 +231,8 @@ function updateSnapshot(snapshot) {
   $("#agent-submit-label").textContent = `交给 ${agentLabel}`;
   $("#agent-orbit").classList.toggle("busy", agent.busy);
   const recoveryHeld = recovery.safety_hold && !recovery.reconsideration_required;
-  $("#send-command").disabled = agent.busy || longTask.active || resetActive || recovery.active || recoveryHeld;
+  $("#send-command").disabled = state.commandPending || agent.busy || longTask.active || resetActive || recovery.active || recoveryHeld || (snapshot.robot_runtime && snapshot.robot_runtime.state !== "READY");
+  updateCommandFeedback(agent, snapshot.robot_runtime);
   $("#start-sim").hidden = resetActive || simulation.process_alive || (simulation.mcp && simulation.command_center);
   $("#start-sim").disabled = resetActive || Boolean(simulation.starting);
   $("#save-map").hidden = !capabilities.costmap;
@@ -319,19 +353,11 @@ function updateSnapshot(snapshot) {
   $("#frame-clock").textContent = localTime(world.sampled_at);
   $("#server-clock").textContent = `SERVER ${localTime(snapshot.server_time)}`;
 
-  const placeholder = $("#camera-placeholder");
-  placeholder.classList.toggle("hidden", world.camera_available);
-  $("#camera-state").textContent = world.camera_available
-    ? (isaacBackend ? "实时 Isaac RGB" : go2Backend ? "实时海康 MV-CU013-A0UC RGB" : "实时共享内存")
-    : "等待视频";
+  refreshHeadCamera();
+  refreshObserverCamera();
   $("#instruction").placeholder = go2Backend
     ? "例如：巡检仓库南区、寻找蓝色球、跟随这个人 8 秒"
     : "例如：先观察四周，然后在空旷处停下。";
-
-  const observerEnabled = Boolean(simulation.third_person_enabled);
-  const observerAvailable = observerEnabled && Boolean(simulation.third_person_available);
-  $("#third-person-placeholder").classList.toggle("hidden", observerAvailable);
-  $("#observer-state").textContent = observerAvailable ? "实时跟随" : observerEnabled ? "等待画面" : "默认关闭";
 
   updateSceneControl(simulation.scene, resetActive, Boolean(simulation.starting), capabilities);
 
@@ -481,6 +507,7 @@ function updateAgentResponse(agent) {
     const message = document.createElement("div");
     message.className = "response-message";
     message.textContent = agent.last_response;
+    if (agent.last_error) message.textContent += `\n原因：${agent.last_error}`;
     const task = agent.last_task_result || {};
     if (task.task_status) {
       const outcome = document.createElement("div");
@@ -622,8 +649,15 @@ function processEventView(event) {
   const data = event.data || {};
   const duration = processDuration(data);
   const callId = typeof data.call_id === "string" ? data.call_id.slice(-10) : "";
-  if (event.title === "Language instruction") {
+  if ((event.source === "agent" && event.kind === "instruction") || event.title === "Language instruction") {
     return { type: "instruction", label: "指令", title: "用户任务", summary: event.message, meta: [] };
+  }
+  if (event.source === "agent" && event.kind === "response") {
+    if (data.task_status === "goal_proposed") return { type: "lifecycle", label: "待确认",
+      title: "组合目标已生成", summary: "请核对目标并确认执行。", meta: [] };
+    const failed = Boolean(data.error) || data.completed === false;
+    return { type: failed ? "failed" : "complete", label: failed ? "未完成" : "结果",
+      title: event.title, summary: data.error || event.message || data.task_status || "任务已返回", meta: [] };
   }
   if (event.title === "Harness model step") {
     const round = data.round || event.message.match(/round=(\d+)/)?.[1] || "?";
@@ -647,7 +681,7 @@ function processEventView(event) {
     };
   }
   if (event.source === "tool" && ["result", "mcp"].includes(event.kind)) {
-    const ok = data.ok !== false && event.level !== "danger" && event.level !== "warning";
+    const ok = data.ok !== false && data.tool_ok !== false && !data.error && event.level !== "danger" && event.level !== "warning";
     return {
       type: ok ? "result" : "failed",
       label: ok ? "结果" : "失败",
@@ -677,7 +711,7 @@ function processEventView(event) {
 function currentAgentProcessEvents() {
   let start = -1;
   for (let index = state.events.length - 1; index >= 0; index -= 1) {
-    if (state.events[index].title === "Language instruction") {
+    if ((state.events[index].source === "agent" && state.events[index].kind === "instruction") || state.events[index].title === "Language instruction") {
       start = index;
       break;
     }
@@ -1116,17 +1150,23 @@ function renderEvents() {
 }
 
 async function pollState() {
+  if (state.statePollPending) return;
+  state.statePollPending = true;
   try {
     const snapshot = await requestJson("/api/state");
     updateSnapshot(snapshot);
   } catch (error) {
     setStatus($("#sim-status"), "UI 离线", "offline");
     setStatus($("#mcp-status"), "未知", "offline");
+    $("#send-command").disabled = true;
+    if (!state.commandPending) commandFeedback(error.message, true);
     console.error(error);
-  }
+  } finally { state.statePollPending = false; }
 }
 
 async function pollEvents() {
+  if (state.eventsPollPending) return;
+  state.eventsPollPending = true;
   try {
     const payload = await requestJson(`/api/events?after=${state.cursor}`);
     if (payload.events.length) {
@@ -1138,7 +1178,7 @@ async function pollEvents() {
     }
   } catch (error) {
     console.error(error);
-  }
+  } finally { state.eventsPollPending = false; }
 }
 
 async function pollCostmap() {
@@ -1163,19 +1203,132 @@ async function pollCostmap() {
   }
 }
 
-function refreshHeadCamera() {
-  const timestamp = Date.now();
-  if (state.snapshot?.world?.camera_available) {
-    $("#camera-feed").src = `/api/camera.jpg?t=${timestamp}`;
+// One request per camera, including image decoding. A capability permits trying
+// the endpoint; the producer and the image load event decide frame readiness.
+function createCameraStream({ image, placeholder, indicator, path, permitted, label, waitingLabel = () => "等待画面" }) {
+  let enabled = false;
+  let loaded = false;
+  let pending = false;
+  let timer = null;
+  let controller = null;
+  let displayedUrl = null;
+  let generation = 0;
+  let epoch = null;
+
+  function render() {
+    placeholder.classList.toggle("hidden", enabled && loaded);
+    indicator.textContent = enabled && loaded ? label() : waitingLabel();
   }
+
+  function discard() {
+    generation += 1;
+    loaded = false;
+    clearTimeout(timer);
+    timer = null;
+    controller?.abort();
+    image.removeAttribute("src");
+    if (displayedUrl) URL.revokeObjectURL(displayedUrl);
+    displayedUrl = null;
+    render();
+  }
+
+  async function requestFrame() {
+    if (!enabled || pending) return;
+    pending = true;
+    const version = generation;
+    const began = performance.now();
+    const requestController = new AbortController();
+    controller = requestController;
+    // Bound both transport and decoding, so a hung frame cannot stall retries.
+    const deadline = setTimeout(() => requestController.abort(), 2000);
+    let nextUrl = null;
+    let succeeded = false;
+    try {
+      const response = await fetch(path, { cache: "no-store", signal: requestController.signal });
+      if (!response.ok) throw new Error(`camera HTTP ${response.status}`);
+      const blob = await response.blob();
+      if (version !== generation || !enabled || requestController.signal.aborted) return;
+      nextUrl = URL.createObjectURL(blob);
+      await new Promise((resolve, reject) => {
+        function cleanup() {
+          image.removeEventListener("load", complete);
+          image.removeEventListener("error", failed);
+          requestController.signal.removeEventListener("abort", aborted);
+        }
+        function complete() {
+          cleanup();
+          if (image.naturalWidth > 0) resolve();
+          else reject(new Error("empty camera image"));
+        }
+        function failed() { cleanup(); reject(new Error("camera decode failed")); }
+        function aborted() { cleanup(); image.removeAttribute("src"); reject(new Error("camera timeout")); }
+        image.addEventListener("load", complete);
+        image.addEventListener("error", failed);
+        requestController.signal.addEventListener("abort", aborted, { once: true });
+        image.src = nextUrl;
+      });
+      if (version !== generation || !enabled) return;
+      if (displayedUrl) URL.revokeObjectURL(displayedUrl);
+      displayedUrl = nextUrl;
+      nextUrl = null;
+      loaded = true;
+      succeeded = true;
+    } catch (_error) {
+      if (version === generation) loaded = false;
+    } finally {
+      clearTimeout(deadline);
+      if (nextUrl) URL.revokeObjectURL(nextUrl);
+      if (controller === requestController) controller = null;
+      pending = false;
+      render();
+      if (enabled) {
+        const interval = document.hidden ? 1000 : succeeded ? 100 : 250;
+        timer = setTimeout(requestFrame, Math.max(0, interval - (performance.now() - began)));
+      }
+    }
+  }
+
+  function sync() {
+    const snapshot = state.snapshot;
+    const nextEpoch = snapshot ? `${snapshot.simulation.backend}:${snapshot.robot_runtime?.boot_epoch || ""}:${Boolean(snapshot.reset?.active)}` : null;
+    const nextEnabled = Boolean(snapshot && !snapshot.reset?.active && permitted(snapshot));
+    const changed = nextEpoch !== epoch || nextEnabled !== enabled;
+    enabled = nextEnabled;
+    epoch = nextEpoch;
+    if (changed) discard();
+    render();
+    if (enabled && !pending && timer === null) void requestFrame();
+  }
+
+  function wake() {
+    clearTimeout(timer);
+    timer = null;
+    sync();
+  }
+
+  return { sync, wake };
 }
 
+function refreshHeadCamera() { state.cameraStream?.sync(); }
+function refreshObserverCamera() { state.observerStream?.sync(); }
 
-function refreshObserverCamera() {
-  const timestamp = Date.now();
-  if (state.snapshot?.simulation?.third_person_available) {
-    $("#third-person-feed").src = `/api/third-person.jpg?t=${timestamp}`;
-  }
+function bindCameraStreams() {
+  state.cameraStream = createCameraStream({
+    image: $("#camera-feed"), placeholder: $("#camera-placeholder"), indicator: $("#camera-state"),
+    path: "/api/camera.jpg",
+    permitted: snapshot => snapshot.simulation.capabilities?.rgb !== false,
+    label: () => state.snapshot?.simulation.backend === "isaac-g1" ? "实时 Isaac RGB"
+      : state.snapshot?.simulation.backend === "mujoco-go2" ? "实时海康 MV-CU013-A0UC RGB" : "实时共享内存",
+  });
+  state.observerStream = createCameraStream({
+    image: $("#third-person-feed"), placeholder: $("#third-person-placeholder"), indicator: $("#observer-state"),
+    path: "/api/third-person.jpg",
+    permitted: snapshot => !snapshot.evaluation?.blind_mode
+      && Boolean(snapshot.simulation.third_person_enabled)
+      && snapshot.simulation.capabilities?.third_person !== false,
+    label: () => "实时跟随",
+    waitingLabel: () => state.snapshot && !state.snapshot.simulation.third_person_enabled ? "默认关闭" : "等待画面",
+  });
 }
 
 function updateExecutionModes(agent) {
@@ -1185,6 +1338,10 @@ function updateExecutionModes(agent) {
   option.disabled = !supported;
   option.textContent = supported ? "自主组合" : "自主组合（当前后端未开放）";
   select.disabled = Boolean(agent.busy);
+  if (!select.dataset.initialized) {
+    select.value = supported && agent.dynamic_composition ? "composed" : "terminal";
+    select.dataset.initialized = "true";
+  }
   if (!supported) select.value = "terminal";
   const tasks = $("#composed-task");
   const catalog = [...(agent.dynamic_composition ? [{ task_key: "", instruction: "输入自定义复杂任务" }] : []), ...(agent.composed_tasks || [])];
@@ -1242,6 +1399,7 @@ function selectExecutionTask() {
 // 提交自然语言及执行模式；动态首次提交不携带确认令牌，由后端生成待确认目标。
 async function submitInstruction(event) {
   event.preventDefault();
+  if (state.commandPending) return;
   const textarea = $("#instruction");
   const instruction = textarea.value.trim();
   if (!instruction) {
@@ -1250,6 +1408,9 @@ async function submitInstruction(event) {
     return;
   }
   $("#send-command").disabled = true;
+  state.commandPending = true;
+  state.commandError = "";
+  commandFeedback("正在提交给 Harness…");
   try {
     const payload = await requestJson("/api/commands", {
       method: "POST",
@@ -1262,11 +1423,15 @@ async function submitInstruction(event) {
     });
     if ($("#execution-mode").value === "terminal") textarea.value = "";
     showToast(payload.message || "指令已发送");
+    commandFeedback("Harness 已受理，正在准备任务。组合目标生成后需要你确认。");
     await pollState();
   } catch (error) {
     showToast(error.message, true);
+    state.commandError = error.message;
+    commandFeedback(error.message, true);
   } finally {
-    if (!state.snapshot?.agent?.busy && !state.snapshot?.reset?.active) {
+    state.commandPending = false;
+    if (!state.snapshot?.agent?.busy && !state.snapshot?.reset?.active && state.snapshot?.robot_runtime?.state === "READY") {
       $("#send-command").disabled = false;
     }
   }
@@ -1608,19 +1773,21 @@ function bindInteractions() {
   window.addEventListener("blur", () => clearManualKeys());
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) clearManualKeys();
+    state.cameraStream?.wake();
+    state.observerStream?.wake();
   });
   window.addEventListener("resize", () => state.snapshot && drawWorldMap(state.snapshot.world, state.costmap));
 }
 
 async function boot() {
+  bindCameraStreams();
   bindInteractions();
-  await Promise.all([pollState(), pollEvents()]);
-  await pollCostmap();
+  void pollState();
+  void pollEvents();
+  void pollCostmap();
   setInterval(pollState, 750);
   setInterval(pollEvents, 650);
   setInterval(pollCostmap, 800);
-  state.cameraTimer = setInterval(refreshHeadCamera, 100);
-  state.observerTimer = setInterval(refreshObserverCamera, 100);
   state.manualTimer = setInterval(() => {
     if (state.manualKeys.size) sendManualCommand();
   }, 120);

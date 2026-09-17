@@ -150,8 +150,8 @@ class EventStore:
                                 tool=data.get("capability_id"), loop="harness")
                     self._events.append({"id": self._next_id, "timestamp":item.timestamp,
                         "source":source,"kind":kind,"title":title,
-                        "message":str(data.get("instruction") or data.get("response") or data.get("content") or data.get("status") or ""),
-                        "level":"info","data":data})
+                        "message":str(data.get("error") or data.get("instruction") or data.get("response") or data.get("content") or data.get("status") or data.get("task_status") or ""),
+                        "level":"danger" if data.get("error") else "info","data":data})
                     self._next_id += 1
             except (OSError, ValueError):
                 pass

@@ -194,6 +194,7 @@ class AgentRuntimeService:
         else:
             with self._lock:
                 self._result = result
+                self._error = getattr(result, "error", "")
                 if (self._pause_requested and execution_mode == "composed" and getattr(task, "confirmed", False)
                         and result.task_status == "cancelled"):
                     import time
