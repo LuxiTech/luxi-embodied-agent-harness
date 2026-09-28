@@ -54,13 +54,21 @@ class OpenAICompatibleModelProvider:
         choice = completion.choices[0]
         message = choice.message
         decisions: list[ToolDecision] = []
-        for call in list(getattr(message, "tool_calls", None) or []):
+        errors = []
+        for index, call in enumerate(list(getattr(message, "tool_calls", None) or [])):
             try:
                 arguments = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError as exc:
-                raise ValueError(f"model returned invalid tool arguments: {exc}") from exc
+                # Record parser coordinates, not potentially sensitive raw text.
+                errors.append({"call_index": index, "reason": "invalid_json", "message": exc.msg,
+                               "line": exc.lineno, "column": exc.colno, "offset": exc.pos})
+                continue
+            except TypeError:
+                errors.append({"call_index": index, "reason": "arguments_not_json_text"})
+                continue
             if not isinstance(arguments, dict):
-                raise ValueError("model tool arguments must be an object")
+                errors.append({"call_index": index, "reason": "arguments_not_object"})
+                continue
             decisions.append(
                 ToolDecision(str(call.function.name), arguments, str(call.id))
             )
@@ -68,9 +76,12 @@ class OpenAICompatibleModelProvider:
         usage_data = usage.model_dump() if usage and hasattr(usage, "model_dump") else {}
         return ModelReply(
             content=str(message.content or ""),
-            tool_calls=tuple(decisions),
+            # Reject the entire reply: never execute its valid prefix and then
+            # retry a malformed tail, which could duplicate physical actions.
+            tool_calls=() if errors else tuple(decisions),
             finish_reason=str(getattr(choice, "finish_reason", "stop")),
             usage=usage_data,
+            tool_argument_errors=tuple(errors),
         )
 
 

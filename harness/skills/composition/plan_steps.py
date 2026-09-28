@@ -4,7 +4,7 @@ COMPLETION_SCHEMA = {
     'type': 'object',
     'properties': {
         'kind': {'type': 'string', 'enum': ['pose', 'goal', 'localized'],
-                 'description': 'pose: 到该目标地点并停稳；goal: 满足该用户目标（如持物）。'},
+                 'description': 'pose: 到该目标地点并停稳；goal: 满足该用户目标；localized: 当前有效的视觉对象绑定，不代表到位或持物。'},
         'goal_id': {'type': 'string'},
     },
     'required': ['kind', 'goal_id'], 'additionalProperties': False,

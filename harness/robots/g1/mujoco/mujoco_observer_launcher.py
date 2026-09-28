@@ -1287,6 +1287,9 @@ def main() -> None:
 
         original_write_lidar = shared_memory_module.ShmReader.write_lidar
         local_sequence = 0
+        from harness.robots.g1.mujoco.critical_diagnostics import CriticalFrameRecorder
+        critical_recorder = (None if _env_enabled("LUXI_BLIND_MODE") else
+                             CriticalFrameRecorder(lidar_proximity_path.parent / "diagnostics/critical-lidar"))
 
         def write_lidar_with_proximity(self: Any, lidar_msg: Any) -> None:
             nonlocal local_sequence
@@ -1302,8 +1305,10 @@ def main() -> None:
                 "external_matched": 0,
                 "robot_removed": 0,
             }
+            camera_ids = ()
+            masks = lidar_masks_state["masks"]
+            raw_points = np.asarray(lidar_msg.pointcloud.points)
             try:
-                masks = lidar_masks_state["masks"]
                 points = lidar_msg.pointcloud.points
                 if masks is not None:
                     camera_ids = tuple(
@@ -1364,6 +1369,17 @@ def main() -> None:
                 )
                 diagnostics["ray_identity"] = ray_diagnostics
                 payload["self_filter"] = diagnostics
+                if critical_recorder is not None:
+                    try:
+                        candidate = critical_recorder.capture(
+                            payload, raw_points, points, model=masks.model, data=data,
+                            camera_ids=camera_ids, self_body_ids=masks.self_body_ids(),
+                            carried_body_ids=set(masks._carried_body_ids())) if masks is not None else None
+                        if candidate:
+                            payload["critical_diagnostic_candidate"] = candidate
+                    except Exception as error:
+                        # A diagnostic failure cannot suppress a fresh safety observation.
+                        payload["critical_diagnostic_error"] = f"{type(error).__name__}: {error}"
                 _write_json_atomically(lidar_proximity_path, payload)
             except Exception:
                 # The sidecar is safety input.  A failed frame remains stale and

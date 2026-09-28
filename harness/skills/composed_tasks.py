@@ -75,7 +75,7 @@ class ComposedSkills:
                 "subgoals": {"type": "array", "minItems": 1, "maxItems": 12,
                              "items": {"type": "string", "minLength": 1, "maxLength": 200}},
                 "reason": reason}, ("subgoals",))),
-            "compose_locate": ("在已标注地点用新鲜 RGB-D 定位 water_bottle，生成取物位姿；不附着、不完成持物目标。",
+            "compose_locate": ("在已标注地点用新鲜 RGB-D 定位后端支持的目标对象，生成取物位姿；不附着、不完成持物目标。",
                                _schema({"recovery_reason": reason})),
             "compose_observe": ("读取当前机器人位置和附着状态。", _schema()),
             "compose_navigate": ("到任务给定的位置，保持当前朝向；携物时检查附着。", _schema({
@@ -96,11 +96,15 @@ class ComposedSkills:
             "conditions": {"type": "array", "minItems": 1, "maxItems": 24, "items": {
                 "type": "object", "properties": {
                     "id": {"type": "string"}, "predicate": {"type": "string", "enum": ["visited", "at", "holding", "released", "acquired", "placed_on"]},
-                    "require_heading": {"type": "boolean", "description": "位置目标仅在用户要求指定朝向时为 true；取放操作必须为 true。"},
-                    "target": {"type": "string"}, "entity_id": {"type": "string", "enum": list(getattr(self.backend, "supported_entities", ("water_bottle",)))},
-                    "target_source": {"type": "string", "enum": ["reference", "visual"], "description": "已标注厨房中的取物 holding 必须 visual；厨房是搜索地点，water_bottle 是对象。"},
+                    "require_heading": {"type": "boolean", "description": "仅为 visited/at 位置目标选择：用户要求指定朝向时为 true，否则 false（省略默认 false）。holding/released/acquired/placed_on 请省略，系统固定为 true，不由模型选择。"},
+                    "target": {"type": "string"}, "entity_id": {"type": "string", "enum": list(getattr(self.backend, "supported_entities", ()))},
+                    "target_source": {"type": "string", "enum": ["reference", "visual"], "description": "搜索区域中的 holding/acquired 必须 visual；区域观察位姿不是对象取物位姿。"},
                     "depends_on": {"type": "array", "items": {"type": "string"}}},
                 "required": ["id", "predicate", "target", "depends_on"], "additionalProperties": False}}}, ("conditions",)))
+        if not getattr(self.backend, "supported_entities", ()):
+            condition_properties = tools["compose_propose_goal"][1]["properties"]["conditions"]["items"]["properties"]
+            condition_properties.pop("entity_id")
+            condition_properties["predicate"]["enum"] = ["visited", "at"]
         tools["compose_blocked"] = ("缺能力、关键信息或无法推进时结束任务，说明具体阻塞。",
                                      _schema({"reason": reason}, ("reason",)))
         # Fixed fixtures retain string plans; dynamic plans are validated structurally at execution.

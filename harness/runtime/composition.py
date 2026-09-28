@@ -303,8 +303,8 @@ def create_agent_runtime_service(events, monitor, *, project_root, backend,
             return 'auto'
         from harness.integrations.qwen.model import create_qwen_model_provider
         from harness.skills.composed_tasks import COMPOSED_PROMPT
-        from harness.skills.composition.prompt import COMPOSED_PROMPT as DYNAMIC_COMPOSED_PROMPT
-        prompt_for_request = lambda request: ((DYNAMIC_COMPOSED_PROMPT if request.metadata.get("goal_kind") == "dynamic" else COMPOSED_PROMPT) if request.metadata.get("execution_mode") == "composed" else system_prompt)
+        from harness.skills.composition.prompt import dynamic_prompt
+        prompt_for_request = lambda request: ((dynamic_prompt(request) if request.metadata.get("goal_kind") == "dynamic" else COMPOSED_PROMPT) if request.metadata.get("execution_mode") == "composed" else system_prompt)
         model_provider = create_qwen_model_provider(config, system_prompt=prompt_for_request, tool_choice=tool_choice)
     scope = AgentScope(agent_id='luxi-agent', session_id=session_id, robot_ids=frozenset({robot_id}),
                        allowed_capabilities=enabled, budget_steps=MAX_PLANNING_STEPS,

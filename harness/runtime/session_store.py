@@ -281,6 +281,25 @@ class LuxiSessionStore:
             ).fetchall()
         return [str(row["session_id"]) for row in rows]
 
+    def tool_call_state(self, session_id: str, tool_call_id: str) -> str | None:
+        """Check durable replay evidence using events_tool, without decoding payloads.
+
+        Deliberately independent of task/turn: reusing a call ID anywhere in the
+        same session must retain the existing no-replay guarantee.
+        """
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT event_type FROM events WHERE tool_call_id=? AND session_id=? "
+                "AND event_type IN ('tool/started', 'tool/result')",
+                (tool_call_id, session_id),
+            ).fetchall()
+        kinds = {row["event_type"] for row in rows}
+        if "tool/result" in kinds:
+            return "finished"
+        if "tool/started" in kinds:
+            return "side_effect_unknown"
+        return None
+
     def latest_session(self, metadata: Mapping[str, Any]) -> str | None:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -399,6 +418,10 @@ def project_model_history(events: Iterable[SessionEvent]) -> list[Mapping[str, A
                 # exponentially duplicating history.
                 history = [item for item in messages if isinstance(item, Mapping)]
         elif event.event_type == "model/replied":
+            if event.payload.get("tool_argument_errors"):
+                # Invalid calls were never executable assistant/tool exchanges.
+                history.append({"role": "user", "content": str(event.payload.get("retry_feedback", ""))})
+                continue
             assistant: dict[str, Any] = {
                 "role": "assistant",
                 "content": str(event.payload.get("content", "")),

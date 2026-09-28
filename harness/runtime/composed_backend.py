@@ -20,6 +20,8 @@ class MujocoCompositionBackend:
         self._locate = locate
         self.scene_id_provider = lambda: None
         self.location_catalog_path = None
+        from pathlib import Path
+        self.entity_catalog_path = Path(__file__).resolve().parents[2] / "config/composed/entities.json"
         self.entity_port = entity_port
         self.entity_id = entity_id
         self.supported_entities = (entity_id,)
@@ -65,7 +67,22 @@ class MujocoCompositionBackend:
         for key, pose in self.references.items():
             if key in catalog['references'] and tuple(pose) != catalog['references'][key]:
                 raise ValueError(f'配置位置 {key} 与已标注目录冲突')
-        return {**catalog, "references": {**catalog['references'], **self.references, "start": tuple(observation["pose"])},
+        import json
+        descriptions = json.loads(self.entity_catalog_path.read_text())
+        operations = ['attach']
+        if self._locate is not None:
+            operations.append('locate')
+        if self.place_supported:
+            operations.append('place')
+        if self.release_supported:
+            operations.append('release')
+        entities = {entity: {**descriptions.get(entity, {'name': entity, 'aliases': []}),
+                             'operations': list(operations)} for entity in self.supported_entities}
+        metadata = dict(catalog.get('reference_metadata', {}))
+        for key in self.references:
+            metadata.setdefault(key, {'kind': 'pose', 'aliases': [], 'description': '操作者提供的导航位姿。'})
+        metadata['start'] = {'kind': 'pose', 'aliases': ['起点'], 'description': '本轮新鲜起始机器人位姿。'}
+        return {**catalog, "entity_catalog": entities, "reference_metadata": metadata, "references": {**catalog['references'], **self.references, "start": tuple(observation["pose"])},
                 "world_revision": observation["world_revision"], "supported_entities": self.supported_entities}
 
     @staticmethod

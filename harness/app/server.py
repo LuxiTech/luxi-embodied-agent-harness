@@ -973,6 +973,8 @@ class FreshLidarProximity:
             "nearest_obstacle_direction": direction,
             "sectors_m": sectors,
             "candidate_points": raw.get("candidate_points"),
+            "critical_diagnostic_candidate": raw.get("critical_diagnostic_candidate"),
+            "critical_diagnostic_error": raw.get("critical_diagnostic_error"),
             "self_filter": {
                 "identity_verified": True,
                 "frames": filter_frames,
@@ -1512,6 +1514,8 @@ class ObservationMonitor:
                 "lidar_frame_timestamp": frame_timestamp,
                 "lidar_age_seconds": round(age, 3),
                 "lidar_sectors_m": sectors,
+                "critical_diagnostic_candidate": payload.get("critical_diagnostic_candidate"),
+                "critical_diagnostic_error": payload.get("critical_diagnostic_error"),
                 "risk_raw": raw_risk,
             },
             ("lidar_sequence", sequence),
@@ -1778,6 +1782,11 @@ class ObservationMonitor:
             if now - self._pending_risk_since < 1.5:
                 return
 
+        if risk == "critical" and metrics.get("critical_diagnostic_candidate"):
+            from harness.robots.g1.mujoco.critical_diagnostics import pin_critical_frame
+            metrics["critical_diagnostic"] = pin_critical_frame(
+                metrics["critical_diagnostic_candidate"], metrics["lidar_sequence"],
+                metrics["lidar_frame_timestamp"])
         self._last_risk = risk
         self._pending_risk = None
         level = "danger" if risk == "critical" else "warning" if risk == "warning" else "info"

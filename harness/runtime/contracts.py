@@ -56,6 +56,7 @@ class ModelReply:
     tool_calls: tuple[ToolDecision, ...] = ()
     finish_reason: str = "stop"
     usage: Mapping[str, Any] = field(default_factory=dict)
+    tool_argument_errors: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

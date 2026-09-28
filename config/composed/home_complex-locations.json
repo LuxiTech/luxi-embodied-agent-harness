@@ -1,19 +1,20 @@
 {
   "scene_id": "home_complex",
   "source": "operator_annotation",
-  "revision": "home-places-v3",
+  "revision": "home-places-v4",
   "locations": {
     "kitchen": {
       "aliases": [
-        "厨房"
+        "厨房",
+        "水瓶取物点",
+        "厨房取物点"
       ],
-      "observation_pose": [
-        0.8,
-        0.2,
-        0.0
+      "robot_pose": [
+        1.91,
+        0.505,
+        1.5707963267948966
       ],
-      "search_radius_m": 2.5,
-      "approach_yaw": 1.5707963267948966
+      "description": "厨房水瓶的人工标注固定取物站位及朝向，使用 target_source=reference；可直接导航到位并停稳后取物，无需视觉定位。这是机器人位姿，不是水瓶中心坐标；物体移走后不保证可取，仍须通过距离和附着检查。"
     }
   },
   "surfaces": {
@@ -40,7 +41,8 @@
         -1.55,
         -3.41,
         -2.89
-      ]
+      ],
+      "description": "已标注的固定放置表面，机器人操作位姿与桌面放置点分别提供。"
     },
     "kitchen_return_point": {
       "aliases": [
@@ -65,7 +67,8 @@
         2.93,
         1.11,
         2.13
-      ]
+      ],
+      "description": "初始摆放区域内的固定标注归还点；不是本轮随机初始位置，也不是本次拿起前位置的动态记录。"
     }
   }
 }

@@ -165,7 +165,9 @@ class AgentRuntimeService:
                                        world_revision=catalog["world_revision"],
                                        visual_regions=catalog.get("visual_regions", {}),
                                        placement_surfaces=catalog.get("placement_surfaces", {}),
-                                       supported_entities=catalog.get("supported_entities", ("water_bottle",)),
+                                       supported_entities=catalog.get("supported_entities", ()),
+                                       entity_catalog=catalog.get("entity_catalog", {}),
+                                       reference_metadata=catalog.get("reference_metadata", {}),
                                        schema_version=5 if catalog.get("placement_surfaces") else 4 if catalog.get("visual_regions") else 3)
                 if getattr(task, "kind", "") == "dynamic" and task.confirmed:
                     scope = replace(scope, budget_steps=max(0, scope.budget_steps-task.preparation_steps),

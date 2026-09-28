@@ -251,6 +251,9 @@ class LuxiToolPipeline:
         )
 
     def _prior_state(self, request: ToolRequest) -> str | None:
+        lookup = getattr(self.events, "tool_call_state", None)
+        if callable(lookup):
+            return lookup(request.session_id, request.tool_call_id)
         try:
             events = self.events.iter_events(request.session_id)
         except AttributeError:
@@ -260,6 +263,13 @@ class LuxiToolPipeline:
             return "finished"
         if "tool/started" in relevant:
             return "side_effect_unknown"
+        return None
+
+    def _execution_blocked(self, request: ToolRequest, cancel: CancellationToken) -> ToolResult | None:
+        if cancel.cancelled:
+            return self._denied("cancelled", "turn was cancelled before tool execution")
+        if request.deadline_monotonic is not None and time.monotonic() >= request.deadline_monotonic:
+            return self._denied("tool_timeout", "tool deadline expired before execution")
         return None
 
     def _execute_stop(self, request):
@@ -333,6 +343,11 @@ class LuxiToolPipeline:
             self._emit("tool/denied", request, result.for_model())
             return result
 
+        blocked = self._execution_blocked(request, cancel)
+        if blocked is not None:
+            self._emit("tool/denied", request, blocked.for_model())
+            return blocked
+
         decision = None
         if descriptor.side_effect is SideEffect.PHYSICAL:
             if request.robot_id is None:
@@ -398,19 +413,27 @@ class LuxiToolPipeline:
                 result = self._denied(status, str(exc)[:1_000])
                 self._emit("tool/denied", request, result.for_model())
                 return result
-        # For physical work this durable boundary must exist before commands start.
-        self._emit("tool/started", request, {"arguments": dict(request.arguments),
-                   "capability_id": request.capability_id, "robot_id": request.robot_id,
-                   "side_effect": descriptor.side_effect.value})
-        if descriptor.side_effect is SideEffect.PHYSICAL:
-            self.safety.mark_active(request.robot_id)
+        adapter_executed = False
         try:
-            raw = adapter.execute(request, execution_cancel)
-            result = normalize_legacy_result(raw)
+            result = self._execution_blocked(request, execution_cancel)
+            if result is None:
+                # This durable boundary can itself block on storage. Check the
+                # deadline again afterwards, before any adapter side effects.
+                self._emit("tool/started", request, {"arguments": dict(request.arguments),
+                           "capability_id": request.capability_id, "robot_id": request.robot_id,
+                           "side_effect": descriptor.side_effect.value})
+                result = self._execution_blocked(request, execution_cancel)
+            if result is None:
+                if descriptor.side_effect is SideEffect.PHYSICAL:
+                    self.safety.mark_active(request.robot_id)
+                adapter_executed = True
+                raw = adapter.execute(request, execution_cancel)
+                result = normalize_legacy_result(raw)
             if (
                 deadline is not None
                 and time.monotonic() > deadline
                 and result.status != "side_effect_unknown"
+                and adapter_executed
             ):
                 result = ToolResult(
                     "tool_timeout",
@@ -424,6 +447,7 @@ class LuxiToolPipeline:
             elif (
                 execution_cancel.cancelled
                 and result.status != "side_effect_unknown"
+                and adapter_executed
             ):
                 result = ToolResult(
                     "cancelled",

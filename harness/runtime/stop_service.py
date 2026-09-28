@@ -1,6 +1,7 @@
 """Local stop service; independent of model, task admission and event availability."""
 from __future__ import annotations
 import re
+from copy import deepcopy
 import threading
 import uuid
 from typing import Any, Mapping
@@ -123,31 +124,43 @@ class StopAuthorityProjection:
         self._after_sequence = 0
         self._latest: Any | None = None
         self._lock = threading.Lock()
+        self._store = None
+        self._session_id = None
 
     def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            try:
+                return self._snapshot()
+            except Exception as exc:
+                return {"available": False, "reason": "session_store_unavailable", "error": str(exc)[:500]}
+
+    def _snapshot(self) -> dict[str, Any]:
         store = self.events.session_store
         session_id = self.events.session_id
         if store is None or session_id is None:
             return {"available": False, "reason": "session_store_unavailable"}
-        with self._lock:
-            while True:
-                batch = store.events(
-                    session_id,
-                    after_sequence=self._after_sequence,
-                    limit=1_000,
-                )
-                if not batch:
-                    break
-                for event in batch:
-                    if event.event_type in {
-                        "safety/stop_requested",
-                        "safety/stop_outcome",
-                    }:
-                        self._latest = event
-                self._after_sequence = batch[-1].sequence
-                if len(batch) < 1_000:
-                    break
-            latest = self._latest
+        if store is not self._store or session_id != self._session_id:
+            self._store, self._session_id = store, session_id
+            self._after_sequence = 0
+            self._latest = None
+        while True:
+            batch = store.events(
+                session_id,
+                after_sequence=self._after_sequence,
+                limit=1_000,
+            )
+            if not batch:
+                break
+            for event in batch:
+                if event.event_type in {
+                    "safety/stop_requested",
+                    "safety/stop_outcome",
+                }:
+                    self._latest = event
+            self._after_sequence = batch[-1].sequence
+            if len(batch) < 1_000:
+                break
+        latest = self._latest
         return {
             "available": True,
             "owner": "RobotStopService",
@@ -158,7 +171,7 @@ class StopAuthorityProjection:
                     "event_type": latest.event_type,
                     "sequence": latest.sequence,
                     "tool_call_id": latest.tool_call_id,
-                    **dict(latest.payload),
+                    **deepcopy(dict(latest.payload)),
                 }
                 if latest is not None
                 else None

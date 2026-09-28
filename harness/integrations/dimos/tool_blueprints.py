@@ -27,6 +27,7 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.camera.module import CameraModule
 
 from dimos.mapping.costmapper import CostMapper
+from harness.robots.g1.mujoco.known_map import KnownSceneCostMapper
 
 from dimos.mapping.voxels import VoxelGridMapper
 
@@ -116,6 +117,7 @@ def _mcp_server_blueprint() -> Any:
 
 luxi_g1_tools_sim = autoconnect(
     unitree_g1_sim,
+    KnownSceneCostMapper.blueprint(),
     HeadDepthSource.blueprint(),
     *_shared_visual_task_modules(MUJOCO_WORLD),
     ObjectTaskSkillContainer.blueprint(
@@ -128,7 +130,7 @@ luxi_g1_tools_sim = autoconnect(
     _mcp_server_blueprint(),
     MujocoLocationTagSkillContainer.blueprint(),
     MUJOCO_WORLD.motion_module.blueprint(),
-).disabled_modules(CameraModule).global_config(n_workers=12)
+).disabled_modules(CameraModule, CostMapper).global_config(n_workers=12)
 
 luxi_g1_isaac_tools_sim = autoconnect(
     unitree_g1_primitive_no_nav,

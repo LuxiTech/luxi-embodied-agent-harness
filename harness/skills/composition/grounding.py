@@ -45,7 +45,7 @@ def validate_visual(task, condition, raw, *, after_wall):
     if (type(visual.get('valid_depth_points')) is not int or visual['valid_depth_points'] < 15
             or type(visual.get('depth_m')) not in (int, float) or not .3 <= visual['depth_m'] <= 8
             or type(visual.get('depth_spread_m')) not in (int, float) or not 0 <= visual['depth_spread_m'] <= .06):
-        raise ValueError('没有可靠的水瓶深度证据')
+        raise ValueError('没有可靠的目标对象深度证据')
     region = task.visual_regions[condition['target']]
     if math.dist(point[:2], task.references[condition['target']][:2]) > region['search_radius_m']:
         raise ValueError('视觉目标在已确认搜索区域之外')

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from copy import deepcopy
 from enum import Enum
 import json
 import threading
@@ -631,8 +632,20 @@ class RuntimeStatusProjection:
     def __init__(self, events: Any, *, robot_id: str) -> None:
         self.events = events
         self.robot_id = robot_id
+        self._lock = threading.Lock()
+        self._store = None
+        self._session_id = None
+        self._after_sequence = 0
+        self._latest = None
+        self._recovery = None
 
     def snapshot(self) -> Mapping[str, Any]:
+        # Serialize catch-up across HTTP threads; the cache remains derived only
+        # from durable events and cannot grant execution authority.
+        with self._lock:
+            return self._snapshot()
+
+    def _snapshot(self) -> Mapping[str, Any]:
         try:
             store = getattr(self.events, "session_store", None)
             session_id = getattr(self.events, "session_id", None)
@@ -644,25 +657,35 @@ class RuntimeStatusProjection:
             }
         if store is None or not isinstance(session_id, str) or not session_id:
             return {"available": False, "robot_id": self.robot_id}
-        latest: Any | None = None
-        recovery: Any | None = None
         try:
-            for event in _session_events(store, session_id):
-                if event.payload.get("robot_id") != self.robot_id:
-                    continue
-                if event.event_type == "runtime/recovered":
-                    recovery = event
-                elif event.event_type == "runtime/status_projected":
-                    latest = event
+            if store is not self._store or session_id != self._session_id:
+                self._store, self._session_id = store, session_id
+                self._after_sequence = 0
+                self._latest = self._recovery = None
+            while True:
+                batch = store.events(session_id, after_sequence=self._after_sequence, limit=1_000)
+                if not batch:
+                    break
+                for event in batch:
+                    if event.payload.get("robot_id") != self.robot_id:
+                        continue
+                    if event.event_type == "runtime/recovered":
+                        self._recovery = event
+                    elif event.event_type == "runtime/status_projected":
+                        self._latest = event
+                self._after_sequence = batch[-1].sequence
+                if len(batch) < 1_000:
+                    break
         except Exception as exc:
             return {
                 "available": False,
                 "robot_id": self.robot_id,
                 "error": str(exc)[:500],
             }
+        latest, recovery = self._latest, self._recovery
         if latest is None:
             return {"available": False, "robot_id": self.robot_id}
-        payload = dict(latest.payload)
+        payload = deepcopy(dict(latest.payload))
         payload["available"] = True
         payload["event_sequence"] = latest.sequence
         payload["projected_from"] = "LuxiSessionStore"

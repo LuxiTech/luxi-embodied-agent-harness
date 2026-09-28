@@ -174,6 +174,7 @@ class LuxiAgentLoop:
         last_result: ToolResult | None = None
         last_capability: str | None = None
         response = ""
+        reply_error = ""
         finished_by_response = False
         messages = list(
             self.context.build_context(
@@ -186,6 +187,7 @@ class LuxiAgentLoop:
             # Mode isolation: old terminal tool histories and camera frames are not model instructions.
             messages = [{"role": "user", "content": text}]
         no_progress = 0
+        argument_repairs = 0
         progress_fingerprint = None
         self._emit(
             "turn/started",
@@ -212,9 +214,17 @@ class LuxiAgentLoop:
                     snapshot = policy.snapshot(snapshot)
                 if composed and completion_capability not in snapshot.capabilities:
                     raise RuntimeError("final verifier is unavailable in current capability scope")
+                planning_capabilities = []
                 if composed:
                     from dataclasses import replace
                     dynamic = getattr(task_spec, "kind", "") == "dynamic"
+                    if dynamic:
+                        from harness.skills.composition.contracts import dynamic_model_tools
+                        # Phase gating hides executable tools, not their planning semantics.
+                        # Only the already scope/backend-filtered snapshot may enter this catalog.
+                        planning_capabilities = [
+                            {"name": tool["function"]["name"], "description": tool["function"]["description"]}
+                            for tool in dynamic_model_tools(snapshot.model_tools(), task_spec)]
                     allowed = set(snapshot.capabilities)
                     # 未确认时只开放目标提议/阻塞工具；确认但无计划时仍不开放运动工具。
                     if dynamic and not task_spec.confirmed:
@@ -232,6 +242,14 @@ class LuxiAgentLoop:
                 if composed:
                     # Rebuild durable task state for every decision, independent of chat history.
                     summary = context_summary(self.events, session_id, task_id)
+                    if dynamic:
+                        planning_context = json.loads(summary["content"])
+                        planning_context["planning_capabilities"] = [
+                            # Callable skills already carry their contract in the tool schema.
+                            {**({"name": entry["name"]} if entry["name"] in snapshot.capabilities else entry),
+                             "callable_now": entry["name"] in snapshot.capabilities}
+                            for entry in planning_capabilities]
+                        summary = {"role": "user", "content": json.dumps(planning_context, ensure_ascii=False)}
                     if self.composed_observe is not None:
                         observation = self.composed_observe()
                         from harness.skills.composed_tasks import _fresh
@@ -269,39 +287,22 @@ class LuxiAgentLoop:
                         "capabilities": list(snapshot.capabilities),
                     },
                 )
+                from harness.skills.composition.prompt import PROMPT_VERSION
+                prompt_version = PROMPT_VERSION if composed and getattr(task_spec, "kind", "") == "dynamic" else "fixed-v1"
+                goal_phase = "proposal" if composed and getattr(task_spec, "kind", "") == "dynamic" and not task_spec.confirmed else "execution"
                 self._emit(
                     "model/context",
                     session_id=session_id,
                     turn_id=turn_id,
                     task_id=task_id,
                     step_id=step_id,
-                    payload={"messages": self._persistent_messages(model_messages)},
+                    payload={"messages": self._persistent_messages(model_messages), "prompt_version": prompt_version, "goal_phase": goal_phase},
                 )
                 # 按任务类型细化模型看到的参数 schema，要求动态动作关联目标和步骤。
                 model_tools = snapshot.model_tools()
                 if composed and getattr(task_spec, "kind", "") == "dynamic":
-                    from copy import deepcopy
-                    model_tools = tuple(deepcopy(tool) for tool in model_tools)
-                    for tool in model_tools:
-                        function = tool["function"]
-                        if function["name"] in {"compose_navigate", "compose_face", "compose_attach", "compose_release", "compose_place", "compose_locate"}:
-                            function["parameters"]["required"] = list(dict.fromkeys([
-                                *function["parameters"].get("required", []), "goal_id", "subgoal_index"]))
-                        if function["name"] == "compose_propose_goal" and task_spec.schema_version >= 3:
-                            items = function["parameters"]["properties"]["conditions"]["items"]
-                            items["required"].append("require_heading")
-                        if function["name"] == "compose_propose_goal":
-                            items = function["parameters"]["properties"]["conditions"]["items"]
-                            items['properties']['target']['enum'] = list(task_spec.references)
-                            items['properties']['entity_id']['enum'] = list(task_spec.supported_entities)
-                            if task_spec.schema_version < 4:
-                                items['properties'].pop('target_source', None)
-                        if function["name"] == "compose_navigate":
-                            function["description"] = "一次完成目标位置及明确要求的朝向，内部处理转向、行走和调整；无需先单独转向。"
-                        if function["name"] == "compose_plan":
-                            items = function["parameters"]["properties"]["subgoals"]["items"]
-                            function["parameters"]["properties"]["subgoals"]["items"] = items["anyOf"][1]
-                            items["anyOf"][1]["required"].append("completion")
+                    from harness.skills.composition.contracts import dynamic_model_tools
+                    model_tools = dynamic_model_tools(model_tools, task_spec)
                 if composed:
                     planning_steps += 1
                 reply = self.model.complete(
@@ -315,12 +316,45 @@ class LuxiAgentLoop:
                         {"instruction": text, "planning_step": planning_steps if composed else planning_steps + 1,
                          "execution_mode": policy.mode,
                          "goal_kind": getattr(task_spec, "kind", "fixed"),
-                         "prompt_version": "dynamic-composition-v4.0" if composed and getattr(task_spec, "kind", "") == "dynamic" else "fixed-v1"},
+                         "goal_phase": goal_phase,
+                         "prompt_version": prompt_version},
                     ),
                     cancel,
                 )
                 if not composed:
                     planning_steps += 1
+                if reply.tool_argument_errors:
+                    argument_repairs += 1
+                    retry = argument_repairs <= 2 and planning_steps < max_steps
+                    feedback = (
+                        "上一轮工具调用的 arguments 不是合法 JSON 对象，整批调用均未执行。"
+                        "请依据当前工具 schema 重新生成完整、合法的 JSON 参数；不要用 Markdown 包裹，"
+                        "不要猜测已执行成功。解析错误："
+                        + json.dumps(reply.tool_argument_errors, ensure_ascii=False)
+                    )
+                    self._emit(
+                        "model/replied", session_id=session_id, turn_id=turn_id,
+                        task_id=task_id, step_id=step_id,
+                        payload={"content": "模型工具参数格式错误，正在重新生成。" if retry else "模型工具参数格式错误，纠错预算已耗尽。",
+                                 "prompt_version": prompt_version, "goal_phase": goal_phase, "finish_reason": reply.finish_reason,
+                                 "usage": dict(reply.usage), "tool_calls": [],
+                                 "tool_argument_errors": list(reply.tool_argument_errors),
+                                 "repair_attempt": argument_repairs, "retry": retry,
+                                 "retry_feedback": feedback},
+                    )
+                    messages.append({"role": "user", "content": feedback})
+                    self._emit("step/completed", session_id=session_id, turn_id=turn_id,
+                               task_id=task_id, step_id=step_id,
+                               payload={"next": "continue" if retry else "finish"})
+                    if retry:
+                        continue
+                    reply_error = "模型返回的工具参数不是合法 JSON 对象；已耗尽本轮纠错预算。"
+                    last_result = ToolResult("runtime_error", False, False, reply_error)
+                    last_capability = None
+                    response = "模型生成的工具参数格式仍不合法，已停止本轮任务；未执行这批工具调用。"
+                    self._stop_all(scope, session_id=session_id, turn_id=turn_id,
+                                   task_id=task_id, reason=last_result.status)
+                    break
                 assistant: dict[str, Any] = {"role": "assistant", "content": reply.content}
                 if reply.tool_calls:
                     assistant["tool_calls"] = [
@@ -343,6 +377,8 @@ class LuxiAgentLoop:
                     step_id=step_id,
                     payload={
                         "content": reply.content,
+                        "prompt_version": prompt_version,
+                        "goal_phase": goal_phase,
                         "finish_reason": reply.finish_reason,
                         "usage": dict(reply.usage),
                         "tool_calls": [
@@ -506,7 +542,7 @@ class LuxiAgentLoop:
                     task_id=task_id,
                     reason=last_result.status,
                 )
-                response = "预算已耗尽，任务未完成；机器人已进入安全停车流程。"
+                response = str(last_result.payload.get("blocked_reason") or "预算已耗尽，任务未完成；机器人已进入安全停车流程。")
 
             completed = bool(
                 finished_by_response
@@ -548,6 +584,7 @@ class LuxiAgentLoop:
                     "planning_steps": planning_steps,
                     "tool_calls": tool_calls,
                     "elapsed_s": max(0.0, time.monotonic() - started),
+                    **({"error": reply_error} if reply_error else {}),
                 },
             )
             return LoopResult(
@@ -561,6 +598,7 @@ class LuxiAgentLoop:
                 planning_steps,
                 tool_calls,
                 last_result,
+                error=reply_error,
             )
         except (CancelledError, TimeoutError) as exc:
             status = "cancelled" if isinstance(exc, CancelledError) else "navigation_timeout"

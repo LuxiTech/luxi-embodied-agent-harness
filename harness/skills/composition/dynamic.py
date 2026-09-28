@@ -4,7 +4,7 @@ import math
 import time
 from harness.robots.composed_pose import POSITION_TOLERANCE_M, YAW_TOLERANCE_RAD
 
-from harness.runtime.composition_goals import DynamicTask, validate_conditions, proposal_digest
+from harness.runtime.composition_goals import DynamicTask, GoalValidationError, invalid_proposal_fingerprint, validate_conditions, proposal_digest, proposal_conditions
 from harness.runtime.task_state import task_projection
 from harness.skills.composed_tasks import _fresh, _schema
 from .plan_steps import validate_completion, step_feedback
@@ -138,10 +138,25 @@ def execute(owner, request, cancel, state):
         if task.confirmed or state.get('proposed_goal'):
             return result('tool_denied', ok=False, payload={'reason': '目标已固定，不能改写'})
         try:
-            conditions = validate_conditions(args.get('conditions'), task.references,
+            conditions = validate_conditions(proposal_conditions(args.get('conditions')), task.references,
                 release_supported=getattr(owner.backend, 'release_supported', False), schema_version=task.schema_version, visual_regions=task.visual_regions,
                 placement_surfaces=task.placement_surfaces, place_supported=getattr(owner.backend, 'place_supported', False),
-                entity_ids=tuple(e for e in task.supported_entities if e in getattr(owner.backend, "supported_entities", ("water_bottle",))))
+                entity_ids=tuple(e for e in task.supported_entities if e in getattr(owner.backend, "supported_entities", ())))
+        except GoalValidationError as exc:
+            fingerprint = invalid_proposal_fingerprint(proposal_conditions(args.get('conditions')), exc.errors, task.schema_version)
+            previous = state.get('steps', [])[-1]['result'] if state.get('steps') else {}
+            repeats = previous.get('repeated_proposal_count', 0) + 1 if previous.get('proposal_fingerprint') == fingerprint else 1
+            exhausted = repeats >= 3
+            payload = {
+                'reason': str(exc), 'validation_errors': exc.errors,
+                'repair_instruction': '逐项核对全部错误及其 condition_ids，重新提交完整目标；保留用户要求，不把执行步骤当最终状态。',
+                'proposal_fingerprint': fingerprint, 'repeated_proposal_count': repeats,
+            }
+            if repeats >= 2:
+                payload['repair_instruction'] = '本次提议没有修正：与上次参数及错误相同。请针对全部错误重新检查目标；不能原样重复或只调整字段顺序。'
+            if exhausted:
+                payload['blocked_reason'] = '连续三次提交相同无效目标，已停止重复尝试。' + str(exc)
+            return result('incomplete_budget_exhausted' if exhausted else 'invalid_input', ok=False, payload=payload)
         except (ValueError, TypeError) as exc:
             return result('invalid_input', ok=False, payload={'reason': str(exc)})
         proposal = {**task.payload(), 'conditions': conditions, 'confirmed': True}
@@ -201,34 +216,45 @@ def execute(owner, request, cancel, state):
                       'verification_frame_timestamp': after['timestamp_monotonic']},
             payload={**goal_feedback(task, after, current, state), 'observation': after})
 
+    def unmet(reason, conditions, *, status='tool_denied'):
+        # Feedback describes absent facts, never prescribes a recovery tool sequence.
+        payload = {'reason': reason, 'action': name, 'goal_id': args.get('goal_id'),
+                   'unmet_preconditions': conditions, 'observation': observation}
+        if _fresh(observation):
+            now, _ = goal_evidence(task, observation, state)
+            payload.update(goal_feedback(task, observation, now, state))
+            payload.update(step_feedback(task, observation, state, now, at))
+        return result(status, ok=False, payload=payload)
+
     index = args.get('subgoal_index')
     if type(index) is not int or not 0 <= index < len(state['plan']):
-        return result('tool_denied', ok=False, payload={'reason': '需要当前计划的 subgoal_index'})
+        return unmet('需要当前计划的有效步骤下标', ['current_plan_step'])
     node = state['plan'][index]
     # 步骤依赖按各自 completion 判断；取物前只需导航到位，不要求 holding 已成立。
     if any(not steps['step_ready'][str(d)] for d in node['depends_on']):
-        return result('tool_denied', ok=False, payload={'reason': '前置步骤的完成条件未满足或物理状态已失效，请检查 step_details',
-                      **goal_feedback(task, observation, current, state), **steps})
+        return unmet('前置步骤未就绪或物理状态已失效', ['plan_dependencies'])
     goal_id = args.get('goal_id')
     condition = next((c for c in task.conditions if c['id'] == goal_id), None)
     if condition is None or goal_id not in node['goal_ids']:
-        return result('tool_denied', ok=False, payload={'reason': '动作必须关联当前子目标'})
+        return unmet('动作必须关联当前步骤的目标', ['step_goal_association'])
     # 用户目标依赖仍独立生效：运输目标要求的 holding 不能被步骤回执绕过。
     if not all(current.get(d, False) for d in condition['depends_on']):
-        return result('tool_denied', ok=False, payload={'reason': '目标前置条件尚未满足', **goal_feedback(task, observation, current, state)})
+        return unmet('目标前置条件尚未满足', ['goal_dependencies'])
+    if condition.get('entity_id') and condition['entity_id'] not in getattr(owner.backend, 'supported_entities', ()):
+        return unmet('后端未声明该对象的操作能力', ['backend_supported_entity'])
     target_name = condition['target']
     target = target_pose(task, condition, state)
     if name == 'compose_locate':
         return locate(owner, request, cancel, state, task, condition, observation, index)
     if target is None:
-        return result('tool_denied', ok=False, payload={'reason': '取物位姿尚未定位或已过期；先 compose_locate', **steps})
+        return unmet('缺少当前目标的有效视觉绑定和取物位姿', ['fresh_visual_binding'])
     if args.get('target', target_name) != target_name:
         return result('invalid_input', ok=False)
     if name == 'compose_face' and not at(observation, target, yaw=False):
-        return result('tool_denied', ok=False, payload={'reason': '转向前先到位'})
+        return unmet('当前目标位置尚未满足', ['target_position'])
     if condition['predicate'] == 'placed_on' and name in {'compose_navigate', 'compose_face', 'compose_place'}:
         if observation.get('attached_entity') != condition['entity_id']:
-            return result('tool_denied', ok=False, payload={'reason': '运输及放置前必须当前持有目标对象'})
+            return unmet('当前未持有目标对象', ['matching_held_entity'])
     if name in {'compose_attach', 'compose_release', 'compose_place'}:
         predicates = {'compose_attach': {'holding', 'acquired'}, 'compose_release': {'released'}, 'compose_place': {'placed_on'}}
         if condition['predicate'] not in predicates[name] or (name == 'compose_release' and not getattr(owner.backend, 'release_supported', False)):
@@ -238,27 +264,23 @@ def execute(owner, request, cancel, state):
         stop = owner.safety.stop(request.robot_id, 'composition_handoff')
         observation = owner.backend.observe()
         if not stop.stationary_confirmed or stop.stationary_confirmed_at is None or not _fresh(observation, stop.stationary_confirmed_at):
-            return result('verification_failed', ok=False)
+            return unmet('缺少停稳后的新鲜观测', ['stationary_confirmed', 'fresh_post_stop_observation'], status='verification_failed')
         if task.world_revision and observation.get('world_revision') != task.world_revision:
             return result('side_effect_unknown', ok=False)
         if not at(observation, target):
-            if name == 'compose_attach':
-                current, _ = goal_evidence(task, observation, state)
-                return result('verification_failed', ok=False, payload={
-                    'reason': '必须先导航到取物点：当前位姿尚未满足拿取要求；定位成功不代表已到位。请先调用 compose_navigate，target 使用当前拿取目标的 target，goal_id 使用该 holding/acquired 目标的 ID，不要使用 visited 目标的 ID；导航成功后再 compose_attach。',
-                    'observation': observation,
-                    **goal_feedback(task, observation, current, state),
-                })
-            return result('verification_failed', ok=False)
+            current, _ = goal_evidence(task, observation, state)
+            return unmet('当前目标操作位姿尚未满足；定位不代表到位',
+                         ['pickup_pose_reached' if name == 'compose_attach' else 'target_pose_reached'],
+                         status='verification_failed')
         attached = observation.get('attached_entity')
         if (name == 'compose_attach' and attached is not None) or (name in {'compose_release', 'compose_place'} and attached != condition['entity_id']):
-            return result('tool_denied', ok=False)
+            return unmet('当前持物状态不满足操作条件', ['empty_attachment' if name == 'compose_attach' else 'matching_held_entity'])
     key = f'{name}:{target_name}:{condition.get("entity_id", "-")}'
     count = state['attempts'].get(key, 0)
     if count >= owner.max_attempts:
         return result('incomplete_budget_exhausted', ok=False)
     if count and not args.get('recovery_reason', '').strip():
-        return result('tool_denied', ok=False, payload={'reason': '重复动作需要新观察和恢复理由'})
+        return unmet('重复动作需要新观察和恢复理由', ['recovery_reason'])
     emit('task/attempt', {'action_key': key, 'subgoal_index': index, 'plan_revision': state['plan_revision'],
                          'recovery_reason': args.get('recovery_reason', ''), 'goal_id': goal_id})
     cancel.raise_if_cancelled()
@@ -280,8 +302,12 @@ def execute(owner, request, cancel, state):
     if task.world_revision and after.get('world_revision') != task.world_revision:
         return result('side_effect_unknown', ok=False)
     if not raw.get('operation_ok'):
-        return result(raw.get('task_status', 'verification_failed'), ok=False, payload={
-            'backend_error': raw.get('error'), **goal_feedback(task, after, goal_evidence(task, after, state)[0], state)} if _fresh(after) else {'reason': '缺少新鲜结果观测'})
+        feedback = ({'backend_error': raw.get('error'),
+                     **goal_feedback(task, after, goal_evidence(task, after, state)[0], state)}
+                    if _fresh(after) else {'reason': '缺少新鲜结果观测'})
+        if isinstance(raw.get('refinement_diagnostic'), dict):
+            feedback['refinement_diagnostic'] = raw['refinement_diagnostic']
+        return result(raw.get('task_status', 'verification_failed'), ok=False, payload=feedback)
     completion = node.get('completion', {})
     milestone_stop = None
     if completion.get('kind') == 'pose' and name in {'compose_navigate', 'compose_face'}:
@@ -351,7 +377,10 @@ def locate(owner, request, cancel, state, task, condition, observation, index):
     # reobserve from the measured approach pose in the same bounded search region.
     if not at(observation, region_pose, yaw=False) and not (previous and
             math.dist(observation['pose'][:2], region_pose[:2]) <= task.visual_regions[condition['target']]['search_radius_m']):
-        return owner._result('tool_denied', ok=False, payload={'reason': '先导航至已标注厨房观察点'})
+        return owner._result('tool_denied', ok=False, payload={
+            'reason': '尚未满足该搜索区域的观察位置要求', 'action': request.capability_id,
+            'goal_id': condition['id'], 'unmet_preconditions': ['observation_position'],
+            'target': condition['target']})
     key = f"compose_locate:{condition['target']}:{condition['entity_id']}"
     count = state['attempts'].get(key, 0)
     if count >= owner.max_attempts:

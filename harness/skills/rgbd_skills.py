@@ -375,16 +375,28 @@ class LiveCostmapRiskMonitor:
         x: float,
         y: float,
         clearance_m: float,
+        diagnostics: dict[str, Any] | None = None,
     ) -> str:
         """Return whether a goal disk remains free in the live planner map."""
+
+        def report(state, reason, **details):
+            if diagnostics is not None:
+                diagnostics.update(state=state, reason=reason, point=[x, y],
+                                   clearance_m=clearance_m, **details)
+            return state
 
         with self._lock:
             snapshot = self._snapshot
         if snapshot is None:
-            return "unknown"
+            return report("unknown", "map_unavailable")
         age = self.clock() - snapshot.received_at
+        if diagnostics is not None:
+            diagnostics.update(map_age_s=age, max_map_age_s=self.max_age_seconds,
+                               map_received_monotonic=snapshot.received_at,
+                               frame_id=snapshot.frame_id, resolution=snapshot.resolution,
+                               origin=[snapshot.origin_x, snapshot.origin_y, snapshot.origin_yaw])
         if age < 0.0 or age > self.max_age_seconds:
-            return "unknown"
+            return report("unknown", "map_stale")
         try:
             relative_x = float(x) - snapshot.origin_x
             relative_y = float(y) - snapshot.origin_y
@@ -396,7 +408,7 @@ class LiveCostmapRiskMonitor:
             row = math.floor(local_y / snapshot.resolution)
             radius = math.ceil(float(clearance_m) / snapshot.resolution)
         except (TypeError, ValueError, OverflowError):
-            return "unknown"
+            return report("unknown", "invalid_region")
         height, width = snapshot.cells.shape
         if (
             radius < 1
@@ -405,7 +417,7 @@ class LiveCostmapRiskMonitor:
             or column - radius < 0
             or column + radius >= width
         ):
-            return "unknown"
+            return report("unknown", "map_out_of_bounds")
         view = snapshot.cells[
             row - radius : row + radius + 1,
             column - radius : column + radius + 1,
@@ -414,7 +426,22 @@ class LiveCostmapRiskMonitor:
         disk = (rr * rr + cc * cc) * snapshot.resolution**2 <= float(
             clearance_m
         ) ** 2
-        return "clear" if np.all(view[disk] == 0) else "blocked"
+        if np.all(view[disk] == 0):
+            return report("clear", "clear")
+        if diagnostics is not None:
+            # Bounded crop of the SAME snapshot used for this decision.
+            crop_radius = min(radius, 16)
+            diagnostics.update(
+                cell=[row, column],
+                nonzero_cells=int(np.count_nonzero(view[disk])),
+                unknown_cells=int(np.count_nonzero(view[disk] < 0)),
+                positive_cost_cells=int(np.count_nonzero(view[disk] > 0)),
+                max_cost=int(view[disk].max()),
+                crop_row=row-crop_radius, crop_column=column-crop_radius,
+                crop_truncated=radius > crop_radius,
+                cells=snapshot.cells[row-crop_radius:row+crop_radius+1,
+                                     column-crop_radius:column+crop_radius+1].tolist())
+        return report("blocked", "nonfree_cells")
 
 
 class LiveCostmapRiskFeed:
