@@ -98,11 +98,11 @@ COMMAND_BYTES = 6 * 4
 # G1 navigation uses a 0.60 m-wide footprint.  User-facing safety thresholds
 # are robot-surface clearances; current lidar still reports centre-to-endpoint
 # distances, so the runtime derives the internal thresholds explicitly.
-G1_FOOTPRINT_RADIUS_M = 0.30
-WARNING_SURFACE_CLEARANCE_M = 0.55
-CRITICAL_SURFACE_CLEARANCE_M = 0.15
-IMMEDIATE_CRITICAL_SURFACE_CLEARANCE_M = 0.10
-CRITICAL_RELEASE_SURFACE_CLEARANCE_M = 0.25
+from harness.robots.g1.safety_geometry import (
+    FOOTPRINT_RADIUS_M as G1_FOOTPRINT_RADIUS_M, WARNING_SURFACE_CLEARANCE_M,
+    CRITICAL_SURFACE_CLEARANCE_M, IMMEDIATE_CRITICAL_SURFACE_CLEARANCE_M,
+    RELEASE_SURFACE_CLEARANCE_M as CRITICAL_RELEASE_SURFACE_CLEARANCE_M,
+)
 WARNING_CENTER_DISTANCE_M = round(
     G1_FOOTPRINT_RADIUS_M + WARNING_SURFACE_CLEARANCE_M,
     6,
@@ -3171,13 +3171,17 @@ class RecoveryTaskCoordinator:
         self.max_resumes = max(0, int(max_resumes))
         self.wait_timeout_seconds = max(0.01, float(wait_timeout_seconds))
         self.poll_interval_seconds = max(0.01, float(poll_interval_seconds))
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._current_instruction: str | None = None
         self._pending_instruction: str | None = None
+        self._pending_mode = "terminal"
         self._generation = 0
         self._resume_attempts = 0
         self._resume_in_progress = False
         self._state = "idle"
+        self._interrupted_task_id: str | None = None
+        self._reason = ""
+        self._detail = ""
 
     def record_user_instruction(self, instruction: str) -> None:
         """Start a new top-level task and invalidate stale recovery callbacks."""
@@ -3188,29 +3192,50 @@ class RecoveryTaskCoordinator:
             self._resume_attempts = 0
             self._generation += 1
             self._state = "task_active"
+            self._interrupted_task_id = None
+            self._reason = ""
+            self._detail = ""
 
-    def cancel_active_for_recovery(self) -> None:
-        """Capture an actually running task before cancelling its old plan."""
+    def reject_recovery(self, reason: str, *, task_id: str | None = None, detail: str = "") -> None:
+        with self._lock:
+            if task_id is not None:
+                self._interrupted_task_id = task_id
+            self._pending_instruction = None
+            self._state = "continuation_unavailable"
+            self._reason = reason
+            self._detail = detail[:500]
+            self._generation += 1
+            data = {"task_id": self._interrupted_task_id, "reason": reason, "detail": self._detail}
+        self.events.append("safety", "recovery", "Automatic task continuation unavailable",
+                           reason, level="warning", data=data)
 
+    def cancel_active_for_recovery(self, *, rejection_reason: str | None = None) -> dict[str, Any]:
+        """The execution owner registers intent and pause atomically by task ID."""
         try:
-            agent_status = self.agent.status()
-            busy = bool(agent_status.get("busy")) and agent_status.get("execution_mode", "terminal") == "terminal"
-        except Exception:  # noqa: BLE001 - cancellation must still be attempted
-            busy = False
+            intent = (self.agent.request_safety_recovery(rejection_reason=rejection_reason)
+                      if rejection_reason else self.agent.request_safety_recovery())
+        except Exception:
+            self.reject_recovery("recovery_registration_failed")
+            self.agent.cancel()
+            return {}
         with self._lock:
             self._generation += 1
-            self._pending_instruction = self._current_instruction if busy else None
-            self._state = "waiting_for_safe_view" if self._pending_instruction else "idle_hold"
-            pending = self._pending_instruction is not None
-        self.agent.cancel()
-        if pending:
+            self._interrupted_task_id = intent.get("task_id")
+            self._pending_mode = intent.get("execution_mode", "terminal")
+            self._reason = ""
+            self._pending_instruction = intent.get("instruction")
+            self._state = "waiting_for_progress_save"
+        if intent.get("state") == "unavailable":
+            self.reject_recovery(intent.get("reason") or "recovery_registration_failed")
+        elif not self._interrupted_task_id or not self._pending_instruction:
+            self.reject_recovery("task_identity_unavailable")
+        else:
             self.events.append(
-                "safety",
-                "recovery",
-                "Interrupted task saved for safe replanning",
-                "The old plan is cancelled; the original user goal may resume only after fresh first-person evidence.",
-                level="warning",
+                "safety", "recovery", "Interrupted task registered for safe replanning",
+                "Waiting for the interrupted task to stop and save its progress.",
+                level="warning", data={"task_id": self._interrupted_task_id},
             )
+        return intent
 
     @staticmethod
     def _continuation_instruction(instruction: str) -> str:
@@ -3224,73 +3249,64 @@ class RecoveryTaskCoordinator:
         )
 
     def resume_once(self) -> bool:
-        """Attempt one non-blocking handoff from the safety hold to a new Agent turn."""
-
+        """Handoff only the saved task, never a stale instruction or another task."""
         with self._lock:
             if self._resume_in_progress or self._pending_instruction is None:
                 return False
             if self._resume_attempts >= self.max_resumes:
+                self.reject_recovery("resume_limit_reached")
                 self._state = "resume_limit_reached"
-                limit_reached = True
-                instruction = None
-            else:
-                limit_reached = False
-                instruction = self._pending_instruction
-                self._resume_in_progress = True
-        if limit_reached:
-            self.events.append(
-                "safety",
-                "recovery",
-                "Automatic task continuation limit reached",
-                "Robot remains stopped; a new operator decision is required.",
-                level="danger",
-            )
-            return False
-        assert instruction is not None
+                return False
+            instruction = self._pending_instruction
+            task_id = self._interrupted_task_id
+            generation = self._generation
+            self._resume_in_progress = True
         try:
             if self.recovery_status().get("state") != "recovered_waiting_replan":
                 return False
-            if self.agent.status().get("busy"):
-                return False
-            continuation = self._continuation_instruction(instruction)
-            submit_with_handoff = getattr(self.agent, "submit_with_handoff", None)
-            if not callable(submit_with_handoff):
-                with self._lock:
-                    self._state = "handoff_unsupported"
-                self.events.append(
-                    "safety",
-                    "error",
-                    "Recovered task cannot acquire motion control",
-                    "The Agent provider lacks an atomic safety-hold handoff; the robot remains stopped.",
-                    level="danger",
-                )
-                return False
-            accepted, message = submit_with_handoff(
-                continuation,
-                self.release_recovery_hold,
-            )
-            if not accepted:
-                with self._lock:
-                    self._state = "waiting_for_agent"
-                self.events.append(
-                    "safety",
-                    "recovery",
-                    "Automatic task continuation deferred",
-                    str(message)[:500],
-                    level="warning",
-                )
-                return False
+            snapshot = self.agent.recovery_snapshot(task_id)
             with self._lock:
+                if generation != self._generation:
+                    return False
+                if snapshot.get("state") == "unavailable":
+                    self.reject_recovery(snapshot.get("reason") or "progress_save_failed")
+                    return False
+                if snapshot.get("busy"):
+                    return False
+                if snapshot.get("state") != "saved":
+                    self.reject_recovery("progress_not_saved")
+                    return False
+                options = {"recovery_task_id": task_id}
+                if self._pending_mode == "composed":
+                    paused = snapshot.get("paused_goal")
+                    if not paused or paused.get("instruction") != instruction:
+                        self.reject_recovery("confirmed_goal_unavailable")
+                        return False
+                    options.update(execution_mode="composed", task_key=paused["task_key"])
+                    continuation = instruction
+                else:
+                    continuation = self._continuation_instruction(instruction)
+                accepted, message = self.agent.submit_with_handoff(
+                    continuation, self.release_recovery_hold, **options,
+                )
+                if not accepted:
+                    self.reject_recovery("handoff_rejected", detail=str(message))
+                    return False
                 self._resume_attempts += 1
                 self._pending_instruction = None
                 self._state = "replanning_original_task"
-            self.events.append(
-                "safety",
-                "recovery",
-                "Original task resumed with a new plan",
-                "A new Agent turn owns control and starts from fresh first-person observations.",
-            )
+                self._reason = ""
+                self.events.append(
+                    "safety", "recovery", "Original task resumed with a new plan",
+                    "A new Agent turn owns control and starts from fresh first-person observations.",
+                    data={"interrupted_task_id": task_id},
+                )
             return True
+        except Exception:
+            with self._lock:
+                if generation == self._generation:
+                    self.reject_recovery("recovery_state_unavailable")
+            return False
         finally:
             with self._lock:
                 self._resume_in_progress = False
@@ -3301,24 +3317,15 @@ class RecoveryTaskCoordinator:
             with self._lock:
                 if generation != self._generation or self._pending_instruction is None:
                     return
-            recovery = self.recovery_status()
-            if recovery.get("state") != "recovered_waiting_replan":
+            if self.recovery_status().get("state") != "recovered_waiting_replan":
                 return
-            if not self.agent.status().get("busy"):
-                self.resume_once()
+            if self.resume_once():
                 return
             time.sleep(self.poll_interval_seconds)
         with self._lock:
             if generation != self._generation or self._pending_instruction is None:
                 return
-            self._state = "agent_cancel_timeout"
-        self.events.append(
-            "safety",
-            "recovery",
-            "Automatic task continuation timed out",
-            "The cancelled Agent turn did not finish in time; the robot remains stopped.",
-            level="danger",
-        )
+            self.reject_recovery("agent_cancel_timeout")
 
     # 安全恢复就绪后，安排等待旧 Agent turn 退出，再尝试重新规划用户任务。
     def recovery_ready(self) -> None:
@@ -3343,8 +3350,23 @@ class RecoveryTaskCoordinator:
             self._resume_attempts = 0
             self._generation += 1
             self._state = "idle"
+            self._interrupted_task_id = None
+            self._reason = ""
+            self._detail = ""
 
     def status(self) -> dict[str, Any]:
+        # Surface a failed save even when physical retreat cannot finish.
+        with self._lock:
+            task_id = self._interrupted_task_id if self._pending_instruction else None
+            generation = self._generation
+        if task_id is not None:
+            try:
+                snapshot = self.agent.recovery_snapshot(task_id)
+            except Exception:
+                snapshot = {"state": "unavailable", "reason": "recovery_state_unavailable"}
+            with self._lock:
+                if generation == self._generation and snapshot.get("state") == "unavailable":
+                    self.reject_recovery(snapshot.get("reason") or "progress_save_failed")
         try:
             busy = bool(self.agent.status().get("busy"))
         except Exception:  # noqa: BLE001 - status must remain observable
@@ -3363,6 +3385,9 @@ class RecoveryTaskCoordinator:
                 "pending": self._pending_instruction is not None,
                 "resume_attempts": self._resume_attempts,
                 "max_resumes": self.max_resumes,
+                "task_id": self._interrupted_task_id,
+                "reason": self._reason,
+                "detail": self._detail,
             }
 
 
@@ -3897,7 +3922,7 @@ class LuxiApplication:
             self.events, self.monitor, project_root=PROJECT_ROOT, backend=self.backend,
             long_task_runner=self.mcp_jobs.run_and_wait, runtime_host=self.robot_runtime,
             scene_id_provider=lambda: self.simulation.scene_status().get("selected_id"),
-            navigation_stop_callback=self.navigation_bridge.force_stop if self.backend == "mujoco" else None,
+            navigation_stop_callback=(lambda: self.navigation_bridge.force_stop(preserve_recovery=True)) if self.backend == "mujoco" else None,
             safety=self.stop_service.safety if self.stop_service else None,
             native_broker=self.native_tool_broker,
             native_motion_port=stop_gateway.port if self.backend == "isaac-g1" and self.stop_service else None,
@@ -3943,6 +3968,7 @@ class LuxiApplication:
                 else self.navigation_bridge.end_safety_recovery
             ),
             on_recovery_ready=self.task_recovery.recovery_ready,
+            motion_handoff_ready=lambda: not self.agent.status().get("busy", True),
             enabled=bool(
                 get_backend_profile(self.backend).capabilities.critical_recovery
                 and
@@ -4112,13 +4138,28 @@ class LuxiApplication:
 
     # 安全恢复前取消当前任务，并区分长任务取消与可重新规划的 Agent 任务。
     def _cancel_for_safety_recovery(self) -> bool:
+        # Register with the execution owner before slow dashboard projections or diagnostics.
         long_task_cancelled = self.mcp_jobs.cancel_active("safety_recovery")
-        if long_task_cancelled:
-            self.agent.cancel()
-            self.task_recovery.reset()
-            return True
-        self.task_recovery.cancel_active_for_recovery()
-        return False
+        intent = self.task_recovery.cancel_active_for_recovery(
+            rejection_reason="independent_long_task" if long_task_cancelled else None,
+        )
+        try:
+            monitor = getattr(self, "monitor", None)
+            observation = monitor.recovery_observation() if monitor is not None else {}
+            metrics = observation.get("metrics", {})
+            self._last_safety_interruption = {
+                "task_id": intent.get("task_id"), "source": "critical_recovery",
+                "risk": metrics.get("risk"),
+                "robot_surface_clearance_m": metrics.get("robot_surface_clearance_m"),
+                "lidar_sequence": metrics.get("lidar_sequence"),
+            }
+            if hasattr(self, "events"):
+                self.events.append("safety", "interruption", "Task interrupted by proximity protection",
+                                   "The current task is being stopped before local recovery.",
+                                   data=dict(self._last_safety_interruption))
+        except Exception:
+            self._last_safety_interruption = None
+        return long_task_cancelled
 
     # 启动地图、观测、安全和机器人运行服务，并按配置启动仿真。
     def start(self) -> None:
@@ -4305,6 +4346,29 @@ class LuxiApplication:
             "event_cursor": self.events.latest_id,
             "server_time": utc_now(),
         }
+        interruption = getattr(self, "_last_safety_interruption", None)
+        task = state["agent"].get("task_progress", {})
+        if (interruption and interruption.get("task_id")
+                and interruption["task_id"] == task.get("task_id")):
+            detail = dict(interruption)
+            detail["recovery_reason"] = state["safety_recovery"].get("reason")
+            detail["route_diagnostic"] = state["safety_recovery"].get("route_diagnostic", {})
+            state["agent"]["safety_interruption"] = detail
+            result = state["agent"].get("last_task_result", {})
+            if result.get("task_status") == "cancelled":
+                result["safety_interruption"] = detail
+                descriptions = {
+                    "no_fresh_verified_retreat_path": "未能验证安全后退路线，保持停车",
+                    "recovery_channel_unavailable": "恢复控制通道不可用，保持停车",
+                    "waiting_for_task_stop_barrier": "等待上一任务完成停车",
+                    "task_stop_barrier_timeout": "等待上一任务停车超时，保持停车",
+                    "retracing_verified_path": "正在沿已验证路线后退",
+                    "awaiting_replan": "已安全撤离，等待重新规划",
+                }
+                reason = descriptions.get(detail["recovery_reason"], "请查看安全恢复状态")
+                clearance = detail.get("robot_surface_clearance_m")
+                distance_text = f"（机器人表面间距约 {clearance:.2f} 米）" if isinstance(clearance, (int, float)) else ""
+                state["agent"]["last_response"] = f"任务因障碍过近而停车{distance_text}；{reason}。"
         return state
 
     # 构造 Agent 可读取的环境上下文，过滤第三人称和展示专用能力。

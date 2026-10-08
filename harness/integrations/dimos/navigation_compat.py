@@ -418,6 +418,18 @@ def planner_init_with_simulation_tuning(
 ) -> None:
     if _ORIGINAL_PLANNER_INIT is None:
         raise RuntimeError("navigation compatibility layer is not installed")
+    import copy
+    from harness.robots.g1.safety_geometry import NAVIGATION_RADIUS_M
+    config = args[0] if args else kwargs.get("global_config")
+    mujoco = str(getattr(config, "simulation", "")).lower() == "mujoco" and os.environ.get("LUXI_SIM_BACKEND") != "isaac-g1"
+    if mujoco:
+        config = copy.copy(config)
+        config.robot_width = max(float(config.robot_width), 2 * NAVIGATION_RADIUS_M)
+        config.robot_rotation_diameter = max(float(config.robot_rotation_diameter), 1.1 * config.robot_width)
+        if args:
+            args = (config, *args[1:])
+        else:
+            kwargs["global_config"] = config
     _ORIGINAL_PLANNER_INIT(planner, *args, **kwargs)
     tune_simulation_stuck_detection(planner)
 

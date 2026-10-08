@@ -302,6 +302,7 @@ class LidarSegmentationMasks:
         self._carried_body_ids: Callable[[], set[int]] = set
         self.max_entries = max(1, int(max_entries))
         self._entries: OrderedDict[int, tuple[Any, Any]] = OrderedDict()
+        self.diagnostic_frames: dict[str, Any] = {}
 
     def set_carried_body_ids_provider(
         self,
@@ -669,7 +670,17 @@ def make_segmentation_aware_renderer(
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self._args = args
             self._kwargs = kwargs
-            self._renderer = original_renderer(*args, **kwargs)
+            # Depth at thin silhouettes must not use multisample depth resolve.
+            model = args[0] if args else kwargs.get("model")
+            quality = getattr(getattr(model, "vis", None), "quality", None)
+            previous_samples = quality.offsamples if quality is not None else None
+            try:
+                if quality is not None:
+                    quality.offsamples = 0
+                self._renderer = original_renderer(*args, **kwargs)
+            finally:
+                if quality is not None:
+                    quality.offsamples = previous_samples
             self._depth_enabled = False
             self._capture_segmentation = False
             self._segmentation_failed = False
@@ -698,6 +709,7 @@ def make_segmentation_aware_renderer(
                     mujoco.mjtObj.mjOBJ_CAMERA,
                     int(camera),
                 )
+            self._camera_name = camera_name
             self._capture_segmentation = bool(
                 self._depth_enabled
                 and not self._segmentation_failed
@@ -713,6 +725,15 @@ def make_segmentation_aware_renderer(
                     self._renderer.enable_segmentation_rendering()
                     segmentation = self._renderer.render()
                     masks.register(depth, segmentation)
+                    try:
+                        if not _env_enabled("LUXI_BLIND_MODE"):
+                            import numpy as np
+                            # Only current lidar frames; diagnostics never affect filtering.
+                            if len(masks.diagnostic_frames) < 3 or self._camera_name in masks.diagnostic_frames:
+                                masks.diagnostic_frames[self._camera_name] = (
+                                    np.array(depth, copy=True), np.array(segmentation, copy=True))
+                    except Exception:
+                        pass
                 except Exception:
                     self._segmentation_failed = True
                     self._capture_segmentation = False
@@ -1059,6 +1080,7 @@ class _ViewerProxy:
         scorer_publisher: BlindScorerTelemetryPublisher | None,
         reset_controller: Any,
         entity_controller: Any | None = None,
+        pacing_data: Any | None = None,
     ) -> None:
         self._handle = handle
         self._publisher = publisher
@@ -1066,11 +1088,16 @@ class _ViewerProxy:
         self._scorer_publisher = scorer_publisher
         self._reset_controller = reset_controller
         self._entity_controller = entity_controller
+        self._pacing_data = pacing_data
+        from harness.robots.g1.mujoco.realtime import RealtimePacer
+        self._pacer = RealtimePacer(pacing_data.time) if pacing_data is not None else None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._handle, name)
 
     def sync(self) -> Any:
+        if self._pacer is not None:
+            self._pacer.sync(self._pacing_data.time)
         lock = getattr(self._handle, "lock", None)
         guard = lock() if callable(lock) else nullcontext()
         with guard:
@@ -1158,6 +1185,7 @@ class _ObservedViewerContext:
             self._scorer_publisher,
             self._reset_controller,
             self._entity_controller,
+            pacing_data=self._data,
         )
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> Any:
@@ -1277,8 +1305,9 @@ def main() -> None:
             lidar_filter_state[status] += 1
         lidar_filter_state["masked_pixels"] += max(0, int(masked_pixels))
 
+    from harness.robots.g1.mujoco.depth_projection import pixel_center_projection
     depth_camera.depth_image_to_point_cloud = make_lidar_self_filter(
-        depth_camera.depth_image_to_point_cloud,
+        pixel_center_projection(depth_camera.depth_image_to_point_cloud),
         robot_pixel_mask=robot_pixel_mask,
         on_filter_result=record_filter_result,
     )
@@ -1374,12 +1403,15 @@ def main() -> None:
                         candidate = critical_recorder.capture(
                             payload, raw_points, points, model=masks.model, data=data,
                             camera_ids=camera_ids, self_body_ids=masks.self_body_ids(),
-                            carried_body_ids=set(masks._carried_body_ids())) if masks is not None else None
+                            carried_body_ids=set(masks._carried_body_ids()),
+                            camera_frames=masks.diagnostic_frames) if masks is not None else None
                         if candidate:
                             payload["critical_diagnostic_candidate"] = candidate
                     except Exception as error:
                         # A diagnostic failure cannot suppress a fresh safety observation.
                         payload["critical_diagnostic_error"] = f"{type(error).__name__}: {error}"
+                if masks is not None:
+                    masks.diagnostic_frames.clear()
                 _write_json_atomically(lidar_proximity_path, payload)
             except Exception:
                 # The sidecar is safety input.  A failed frame remains stale and

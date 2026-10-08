@@ -1,8 +1,13 @@
 {
   "scene_id": "home_complex",
   "source": "operator_annotation",
-  "revision": "home-places-v4",
+  "revision": "home-places-v5",
   "locations": {
+    "start": {
+      "aliases": ["起点", "初始位置", "起始位置", "场景起点"],
+      "robot_pose": [-3.0, -1.75, 0.0],
+      "description": "场景的固定初始机器人位姿，跨任务保持并永久保存在先验位置目录中；不是当前任务开始时的位置。使用 target_source=reference。"
+    },
     "kitchen": {
       "aliases": [
         "厨房",

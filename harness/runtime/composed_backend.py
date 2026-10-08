@@ -81,8 +81,8 @@ class MujocoCompositionBackend:
         metadata = dict(catalog.get('reference_metadata', {}))
         for key in self.references:
             metadata.setdefault(key, {'kind': 'pose', 'aliases': [], 'description': '操作者提供的导航位姿。'})
-        metadata['start'] = {'kind': 'pose', 'aliases': ['起点'], 'description': '本轮新鲜起始机器人位姿。'}
-        return {**catalog, "entity_catalog": entities, "reference_metadata": metadata, "references": {**catalog['references'], **self.references, "start": tuple(observation["pose"])},
+        references = {**catalog['references'], **self.references}
+        return {**catalog, "entity_catalog": entities, "reference_metadata": metadata, "references": references,
                 "world_revision": observation["world_revision"], "supported_entities": self.supported_entities}
 
     @staticmethod

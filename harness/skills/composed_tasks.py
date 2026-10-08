@@ -52,6 +52,25 @@ def _fresh(observation, after=None):
                     and math.isfinite(x) for x in pose))
 
 
+def _navigation_succeeded(raw):
+    """Accept planner arrival or an independently verified, stopped local handoff."""
+    if raw.get("operation_ok") is not True:
+        return False
+    if raw.get("planner_goal_reached") is True:
+        return True
+    stopped = raw.get("stationary_confirmed_at")
+    verified = raw.get("arrival_verification_timestamp")
+    return (raw.get("planner_goal_reached") is False
+            and raw.get("task_status") == "verified"
+            and raw.get("arrival_verified") is True
+            and raw.get("stationary_confirmed") is True
+            and isinstance(raw.get("navigation_handoff"), dict)
+            and raw["navigation_handoff"].get("trigger") == "near_goal"
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                    for v in (stopped, verified))
+            and stopped < verified <= time.time())
+
+
 def _at(observation, pose, task, *, yaw=True):
     actual = observation["pose"]
     return (math.hypot(actual[0] - pose[0], actual[1] - pose[1]) <= task.position_tolerance_m
@@ -273,7 +292,7 @@ class ComposedSkills:
         after = self.backend.observe()
         valid = _fresh(after) and after["timestamp_monotonic"] > observation["timestamp_monotonic"]
         if name in {"compose_navigate", "compose_face"}:
-            valid = valid and result.get("planner_goal_reached") is True and _at(after, pose, task)
+            valid = valid and _navigation_succeeded(result) and _at(after, pose, task)
             valid = valid and (attached is None or after.get("attached_entity") == attached)
         elif name == "compose_attach":
             valid = valid and after.get("attached_entity") == task.entity_id

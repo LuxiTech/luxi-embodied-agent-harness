@@ -94,6 +94,8 @@ class ObjectTaskConfig(ModuleConfig):
     max_heading_error_degrees: float = Field(default=35.0, gt=5.0, le=60.0)
     manipulation_settle_s: float = Field(default=0.8, ge=0.0, le=3.0)
     manipulation_takeover_radius_m: float = Field(default=0.18, ge=0.08, le=0.30)
+    # Leave braking room before the composed refiner's 0.35 m admission limit.
+    composed_takeover_radius_m: float = Field(default=0.25, ge=0.15, le=0.30)
     manipulation_refine_timeout_s: float = Field(default=8.0, ge=2.0, le=15.0)
     manipulation_contact_margin_m: float = Field(default=0.006, ge=0.0, le=0.01)
     visual_evidence_max_age_s: float = Field(default=12.0, gt=1.0, le=30.0)
@@ -910,6 +912,7 @@ class ObjectTaskSkillContainer(Module):
         heading_tolerance_degrees: float = 5.0,
         require_heading: bool = True,
         translation_guard=None,
+        translation_guard_retryable=None,
     ) -> dict[str, Any]:
         """Finish a nearby manipulation pose without another global A* goal."""
 
@@ -936,6 +939,7 @@ class ObjectTaskSkillContainer(Module):
             else timeout
         )
         stable_since: float | None = None
+        guard_wait_until: float | None = None
         last_distance = math.inf
         last_heading_error = math.inf
         try:
@@ -952,7 +956,18 @@ class ObjectTaskSkillContainer(Module):
                     time.sleep(0.05)
                     continue
                 if translation_guard is not None and not translation_guard(odom):
+                    publisher.publish(Twist.zero())
+                    stable_since = None
+                    # Opt-in transient map waits keep zero velocity and consume
+                    # the existing deadline; other guard failures remain terminal.
+                    if translation_guard_retryable is not None and translation_guard_retryable():
+                        if guard_wait_until is None:
+                            guard_wait_until = min(deadline, time.monotonic() + 2.0)
+                        if time.monotonic() < guard_wait_until:
+                            time.sleep(0.05)
+                            continue
                     return _result("risk_blocked", False, error="fresh refinement corridor unavailable")
+                guard_wait_until = None
                 x = float(odom.position.x)
                 y = float(odom.position.y)
                 yaw = float(odom.orientation.to_euler().yaw)
@@ -1099,36 +1114,76 @@ class ObjectTaskSkillContainer(Module):
         revision = cancel_revision or None
         if channel.changed_since(revision):
             return _result("cancelled", False)
+        from harness.robots.g1.mujoco.composed_navigation import refine_arrival, settled_pose_evidence
         self._composition_cancel = (channel, revision, expires_at)
+        handoff = {'takeover_radius_m': self.config.composed_takeover_radius_m,
+                   'require_heading': require_heading, 'trigger': None, 'refinement_requested': False}
+        outcome = _result("verification_failed", False)
+        planner_reached = False
         try:
-            if not require_heading:
-                odom = getattr(self, '_latest_odom', None)
-                if odom is None:
-                    return _result('observation_unavailable', False)
-                dx, dy = x-float(odom.position.x), y-float(odom.position.y)
-                # A path-following hint, never a user terminal-heading condition.
-                yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > .10 else float(odom.orientation.to_euler().yaw)
-            outcome = self._navigate_pose(self._goal((x, y, yaw)), expires_at-time.time(),
-                                           arrival_tolerance_m=POSITION_TOLERANCE_M,
-                                           heading_tolerance_degrees=math.degrees(YAW_TOLERANCE_RAD) if require_heading else None)
-            if outcome.get("operation_ok") and outcome.get("planner_goal_reached"):
-                settled = self._confirm_stationary_after_stop()
-                if not settled.get("stationary_confirmed"):
-                    return {**settled, "operation_ok": False, "task_status": "verification_failed"}
-                odom = getattr(self, "_latest_odom", None)
-                error = math.inf if odom is None else math.hypot(x-float(odom.position.x), y-float(odom.position.y))
-                actual_yaw = 0 if odom is None else float(odom.orientation.to_euler().yaw)
-                yaw_error = abs(math.atan2(math.sin(yaw-actual_yaw), math.cos(yaw-actual_yaw)))
-                # 精调只补足任务到位要求；已经达标不能被额外精度门槛阻断。
-                if error > POSITION_TOLERANCE_M or (require_heading and yaw_error > YAW_TOLERANCE_RAD):
-                    from harness.robots.g1.mujoco.composed_navigation import refine_arrival
-                    refined = refine_arrival(self, self._goal((x, y, yaw)), expires_at, require_heading=require_heading)
-                    outcome = {**outcome, **refined, "planner_goal_reached": True}
+            try:
+                if not require_heading:
+                    odom = getattr(self, '_latest_odom', None)
+                    if odom is None:
+                        return _result('observation_unavailable', False)
+                    dx, dy = x-float(odom.position.x), y-float(odom.position.y)
+                    # Only a path-following hint; it is not a final heading requirement.
+                    yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > .10 else float(odom.orientation.to_euler().yaw)
+                goal = self._goal((x, y, yaw))
+                outcome = self._navigate_pose(
+                    goal, expires_at-time.time(), arrival_tolerance_m=POSITION_TOLERANCE_M,
+                    heading_tolerance_degrees=math.degrees(YAW_TOLERANCE_RAD) if require_heading else None,
+                    takeover_radius_m=self.config.composed_takeover_radius_m,
+                )
+                planner_reached = outcome.get('planner_goal_reached') is True
+                near_goal = (outcome.get('task_status') == 'near_goal'
+                             and outcome.get('local_takeover_required') is True)
+                if outcome.get('operation_ok') and (planner_reached or near_goal):
+                    handoff['trigger'] = 'planner_arrived' if planner_reached else 'near_goal'
+                    settled = self._confirm_stationary_after_stop()
+                    if not settled.get('stationary_confirmed'):
+                        outcome = _result('verification_failed', False, error='navigation handoff did not confirm stationarity')
+                    elif self._long_task_cancel_reason() is not None:
+                        outcome = _result('cancelled', False)
+                    else:
+                        pose = settled_pose_evidence(self, goal, settled, expires_at, require_heading=require_heading)
+                        handoff['settled_pose'] = pose
+                        if not pose['observation_valid']:
+                            outcome = _result('observation_unavailable', False, error=pose['reason'])
+                        elif pose['within_tolerance']:
+                            outcome = _result('arrived', True, local_odometry_refined=False)
+                        else:
+                            handoff['refinement_requested'] = True
+                            outcome = refine_arrival(self, goal, expires_at, require_heading=require_heading)
+                elif outcome.get('operation_ok'):
+                    # Neither a planner arrival nor the explicit bounded handoff is completion.
+                    outcome = _result('verification_failed', False, error='navigation completion evidence unavailable')
+            finally:
+                stop = self._confirm_stationary_after_stop()
+            # An accepted handoff/refinement is not success until the final stopped pose is verified.
+            if self._long_task_cancel_reason() is not None:
+                outcome = {**outcome, 'operation_ok': False, 'task_status': 'cancelled'}
+            elif outcome.get('operation_ok'):
+                if not stop.get('stationary_confirmed'):
+                    outcome = {**outcome, 'operation_ok': False, 'task_status': 'verification_failed'}
+                else:
+                    pose = settled_pose_evidence(self, goal, stop, expires_at, require_heading=require_heading)
+                    handoff['final_pose'] = pose
+                    verified = pose.get('observation_valid') is True and pose.get('within_tolerance') is True
+                    outcome = {**outcome, 'operation_ok': verified,
+                               'task_status': ('arrived' if planner_reached else 'verified') if verified else 'verification_failed',
+                               'arrival_verified': verified,
+                               'arrival_verification_timestamp': pose.get('pose_timestamp')}
+                    if not verified:
+                        outcome['error'] = pose.get('reason', 'final stopped pose is outside arrival tolerance')
+            if self._long_task_cancel_reason() is not None:
+                outcome = {**outcome, 'operation_ok': False, 'task_status': 'cancelled', 'arrival_verified': False}
+            return {**outcome, **stop, 'tool_ok': True, 'completed': False,
+                    'operation_ok': bool(outcome.get('operation_ok') and stop.get('stationary_confirmed')),
+                    'planner_goal_reached': planner_reached, 'navigation_handoff': handoff,
+                    'interaction_model': 'sim_attachment', 'candidate': True}
         finally:
-            stop = self._confirm_stationary_after_stop()
             self._composition_cancel = None
-        return {**outcome, **stop, "operation_ok": bool(outcome.get("operation_ok") and stop.get("stationary_confirmed")),
-                "interaction_model": "sim_attachment", "candidate": True}
 
     @skill(uses=[CAP_MOVEMENT])
     def navigate_to(self, target: str, timeout: float = 60.0) -> dict[str, Any]:

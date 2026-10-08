@@ -215,6 +215,7 @@ class LuxiAgentLoop:
                 if composed and completion_capability not in snapshot.capabilities:
                     raise RuntimeError("final verifier is unavailable in current capability scope")
                 planning_capabilities = []
+                plan_required = False
                 if composed:
                     from dataclasses import replace
                     dynamic = getattr(task_spec, "kind", "") == "dynamic"
@@ -235,7 +236,8 @@ class LuxiAgentLoop:
                             allowed -= {"compose_blocked", "compose_locate", "compose_place"}
                     if dynamic and task_spec.confirmed:
                         from .task_state import task_projection
-                        if not task_projection(self.events, session_id, task_id)["plan"]:
+                        plan_required = not task_projection(self.events, session_id, task_id)["plan"]
+                        if plan_required:
                             allowed -= {"compose_navigate", "compose_face", "compose_attach", "compose_release", "compose_place", "compose_locate"}
                     snapshot = replace(snapshot, capabilities={k: v for k, v in snapshot.capabilities.items() if k in allowed})
                 model_messages = messages
@@ -244,11 +246,28 @@ class LuxiAgentLoop:
                     summary = context_summary(self.events, session_id, task_id)
                     if dynamic:
                         planning_context = json.loads(summary["content"])
-                        planning_context["planning_capabilities"] = [
-                            # Callable skills already carry their contract in the tool schema.
-                            {**({"name": entry["name"]} if entry["name"] in snapshot.capabilities else entry),
-                             "callable_now": entry["name"] in snapshot.capabilities}
-                            for entry in planning_capabilities]
+                        planning_context["planning_state"] = {
+                            "phase": "proposal" if not task_spec.confirmed else "planning" if plan_required else "execution",
+                            "next_required_tool": "compose_plan" if plan_required else None,
+                        }
+                        catalog = []
+                        for entry in planning_capabilities:
+                            name = entry["name"]
+                            callable_now = name in snapshot.capabilities
+                            item = {**({"name": name} if callable_now else entry),
+                                    "callable_now": callable_now}
+                            if not callable_now:
+                                if not task_spec.confirmed:
+                                    reason, available_after = "goal_confirmation_required", "user_confirmation"
+                                elif name == "compose_propose_goal":
+                                    reason, available_after = "goal_already_confirmed", None
+                                elif plan_required:
+                                    reason, available_after = "plan_required", "compose_plan"
+                                else:
+                                    reason, available_after = "not_available_in_phase", None
+                                item.update(unavailable_reason=reason, available_after=available_after)
+                            catalog.append(item)
+                        planning_context["planning_capabilities"] = catalog
                         summary = {"role": "user", "content": json.dumps(planning_context, ensure_ascii=False)}
                     if self.composed_observe is not None:
                         observation = self.composed_observe()

@@ -17,6 +17,7 @@ import math
 import threading
 import time
 from typing import Any, Callable
+from harness.robots.g1.safety_geometry import FOOTPRINT_RADIUS_M, RECOVERY_MARGIN_M
 
 
 def _utc_now() -> str:
@@ -28,8 +29,8 @@ class RecoveryConfig:
     poll_interval_seconds: float = 0.10
     recovery_speed_mps: float = 0.06
     safe_clearance_m: float = 0.55
-    footprint_radius_m: float = 0.30
-    footprint_margin_m: float = 0.04
+    footprint_radius_m: float = FOOTPRINT_RADIUS_M
+    footprint_margin_m: float = RECOVERY_MARGIN_M
     center_unknown_allowance_m: float = 0.10
     breadcrumb_spacing_m: float = 0.05
     max_breadcrumb_age_seconds: float = 30.0
@@ -43,6 +44,7 @@ class RecoveryConfig:
     stationary_speed_mps: float = 0.025
     stationary_samples: int = 2
     stop_confirmation_timeout_seconds: float = 2.0
+    task_stop_barrier_timeout_seconds: float = 75.0
     max_recovery_seconds: float = 8.0
     progress_timeout_seconds: float = 1.5
     warning_approach_guard: bool = False
@@ -259,6 +261,7 @@ class CriticalRecoveryController:
         publish_recovery: Callable[[object, float, float], bool],
         end_hold: Callable[[object], bool],
         on_recovery_ready: Callable[[], None] | None = None,
+        motion_handoff_ready: Callable[[], bool] | None = None,
         enabled: bool = True,
         config: RecoveryConfig | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -273,6 +276,9 @@ class CriticalRecoveryController:
         self.publish_recovery = publish_recovery
         self.end_hold = end_hold
         self.on_recovery_ready = on_recovery_ready
+        self.motion_handoff_ready = motion_handoff_ready or (lambda: True)
+        self._route_diagnostic: dict[str, Any] = {}
+        self._route_end_recorded_at = None
         self.enabled = bool(enabled)
         self.config = config or RecoveryConfig()
         self.clock = clock
@@ -494,28 +500,34 @@ class CriticalRecoveryController:
         self,
         pose: RecoveryPose,
         grid: LiveCostmapEvidence,
+        *, before_recorded_at: float | None = None,
     ) -> deque[Breadcrumb] | None:
         now = self.clock()
+        self._route_diagnostic = {"reason": "no_eligible_destination"}
         with self._lock:
-            candidates = list(reversed(self._breadcrumbs))
+            candidates = [p for p in reversed(self._breadcrumbs)
+                          if before_recorded_at is None or p.recorded_at < before_recorded_at]
         if not candidates:
+            self._route_diagnostic = {"reason": "no_breadcrumbs"}
             return None
         if math.hypot(candidates[0].x - pose.x, candidates[0].y - pose.y) > (
             self.config.max_join_distance_m
         ):
+            self._route_diagnostic = {"reason": "breadcrumb_join_too_far"}
             return None
 
         route: deque[Breadcrumb] = deque()
         previous = (pose.x, pose.y)
         distance = 0.0
-        has_recovery_destination = False
         for point in candidates:
             if now - point.recorded_at > self.config.max_breadcrumb_age_seconds:
                 break
             segment_length = math.hypot(point.x - previous[0], point.y - previous[1])
             if segment_length < self.config.breadcrumb_spacing_m * 0.4:
                 if point.safe_destination and distance >= self.config.min_retreat_distance_m:
-                    has_recovery_destination = True
+                    self._route_end_recorded_at = point.recorded_at
+                    self._route_diagnostic = {"reason": "verified", "distance_m": distance}
+                    return route
                 continue
             distance += segment_length
             if distance > self.config.max_retreat_distance_m:
@@ -526,12 +538,16 @@ class CriticalRecoveryController:
                 self._footprint_clearance,
                 allow_traversed_unknown=True,
             ):
+                self._route_diagnostic = {"reason": "segment_blocked", "start": list(previous),
+                                          "end": [point.x, point.y], "radius_m": self._footprint_clearance}
                 return None
             route.append(point)
             previous = (point.x, point.y)
             if point.safe_destination and distance >= self.config.min_retreat_distance_m:
-                has_recovery_destination = True
-        return route if has_recovery_destination else None
+                self._route_diagnostic = {"reason": "verified", "distance_m": distance}
+                self._route_end_recorded_at = point.recorded_at
+                return route
+        return None
 
     def _heartbeat_zero(self) -> bool:
         with self._lock:
@@ -651,6 +667,13 @@ class CriticalRecoveryController:
         if self._stationary_sample(pose, stop_completed):
             with self._lock:
                 self._stationary_confirmed_at = self.wall_clock()
+            if not self.motion_handoff_ready():
+                if self.clock() - stop_started > self.config.task_stop_barrier_timeout_seconds:
+                    self._hold("task_stop_barrier_timeout")
+                else:
+                    with self._lock:
+                        self._reason = "waiting_for_task_stop_barrier"
+                return
             grid = self._grid(pose)
             if grid is None:
                 self._wait_for_fresh_costmap()
@@ -662,6 +685,7 @@ class CriticalRecoveryController:
                 return
             with self._lock:
                 self._state = "retreating"
+                self._started_at = self.clock()
                 self._reason = "retracing_verified_path"
                 self._route = route
                 self._last_progress_at = self.clock()
@@ -754,8 +778,13 @@ class CriticalRecoveryController:
                 self._best_waypoint_distance = None
                 self._last_progress_at = self.clock()
             if not self._route:
-                self._hold("verified_route_ended_before_clear")
-                return
+                # The destination's live view may have changed. Validate the next
+                # older segment only now, without invalidating a usable short route.
+                route = self._select_route(pose, grid, before_recorded_at=self._route_end_recorded_at)
+                if not route:
+                    self._hold("verified_route_ended_before_clear")
+                    return
+                self._route = route
             point = self._route[0]
             distance = math.hypot(point.x - pose.x, point.y - pose.y)
             best = self._best_waypoint_distance
@@ -898,7 +927,7 @@ class CriticalRecoveryController:
             "Safety recovery held position",
             detail or reason.replace("_", " "),
             level="danger",
-            data={"reason": reason},
+            data={"reason": reason, "route_diagnostic": dict(self._route_diagnostic)},
         )
 
     def step(self) -> None:
@@ -976,6 +1005,8 @@ class CriticalRecoveryController:
             self._last_outcome = ""
             self._hold_token = None
             self._route.clear()
+            self._route_diagnostic = {}
+            self._route_end_recorded_at = None
             self._started_at = None
             self._stop_started_at = None
             self._stop_command_completed_at = None
@@ -1010,6 +1041,7 @@ class CriticalRecoveryController:
                 "state": state,
                 "active": state in self.ACTIVE_STATES,
                 "safety_hold": self._hold_token is not None,
+                "route_diagnostic": dict(self._route_diagnostic),
                 "reconsideration_required": state == "recovered_waiting_replan",
                 "reason": self._reason,
                 "last_outcome": self._last_outcome,

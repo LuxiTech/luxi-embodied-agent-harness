@@ -480,12 +480,13 @@ class NavigationVelocityBridge:
         while not self._stop.wait(interval):
             self.check_watchdog()
 
-    def force_stop(self, *, announce: bool = False) -> None:
+    def force_stop(self, *, announce: bool = False, preserve_recovery: bool = False) -> None:
         with self._output_lock:
             with self._lock:
                 was_active = self._active or self._recovery_token is not None
                 self._active = False
-                self._recovery_token = None
+                if not preserve_recovery:
+                    self._recovery_token = None
                 self._last_command = VelocityCommand(0.0, 0.0, 0.0)
                 self._blocked_until = max(
                     self._blocked_until,

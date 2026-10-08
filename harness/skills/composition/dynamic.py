@@ -6,7 +6,7 @@ from harness.robots.composed_pose import POSITION_TOLERANCE_M, YAW_TOLERANCE_RAD
 
 from harness.runtime.composition_goals import DynamicTask, GoalValidationError, invalid_proposal_fingerprint, validate_conditions, proposal_digest, proposal_conditions
 from harness.runtime.task_state import task_projection
-from harness.skills.composed_tasks import _fresh, _schema
+from harness.skills.composed_tasks import _fresh, _schema, _navigation_succeeded
 from .plan_steps import validate_completion, step_feedback
 from .grounding import is_visual, target_pose, binding_for, validate_visual
 
@@ -305,6 +305,8 @@ def execute(owner, request, cancel, state):
         feedback = ({'backend_error': raw.get('error'),
                      **goal_feedback(task, after, goal_evidence(task, after, state)[0], state)}
                     if _fresh(after) else {'reason': '缺少新鲜结果观测'})
+        if isinstance(raw.get('navigation_handoff'), dict):
+            feedback['navigation_handoff'] = raw['navigation_handoff']
         if isinstance(raw.get('refinement_diagnostic'), dict):
             feedback['refinement_diagnostic'] = raw['refinement_diagnostic']
         return result(raw.get('task_status', 'verification_failed'), ok=False, payload=feedback)
@@ -324,7 +326,8 @@ def execute(owner, request, cancel, state):
     valid = _fresh(after, observation['timestamp_monotonic'])
     extra = {}
     if name in {'compose_navigate', 'compose_face'}:
-        valid = valid and raw.get('planner_goal_reached') is True and at(after, target, yaw=condition['require_heading'] or name == 'compose_face')
+        extra = {key: raw[key] for key in ('planner_goal_reached', 'arrival_verified', 'navigation_handoff') if key in raw}
+        valid = valid and _navigation_succeeded(raw) and at(after, target, yaw=condition['require_heading'] or name == 'compose_face')
     elif name == 'compose_attach':
         valid = valid and after.get('attached_entity') == condition['entity_id']
         if valid:
@@ -343,7 +346,7 @@ def execute(owner, request, cancel, state):
         return result('side_effect_unknown', ok=False)
     if not valid:
         return result('verification_failed', payload={'action_verified': False, 'subgoal_verified': False,
-                      'observation': after, **(goal_feedback(task, after, goal_evidence(task, after, state)[0], state) if _fresh(after) else {})})
+                      'observation': after, **extra, **(goal_feedback(task, after, goal_evidence(task, after, state)[0], state) if _fresh(after) else {})})
     updated = {**state, 'goal_evidence': evidence,
                'steps': [*state['steps'], {'result': extra}]}
     current, evidence = goal_evidence(task, after, updated)
@@ -392,7 +395,7 @@ def locate(owner, request, cancel, state, task, condition, observation, index):
     # The catalog yaw is a camera viewing direction, not a stricter user arrival goal.
     if at(observation, region_pose, yaw=False) and not at(observation, region_pose):
         raw = owner.backend.navigate((*observation['pose'][:2], region_pose[2]), cancel, request.deadline_monotonic)
-        if not raw.get('operation_ok') or raw.get('planner_goal_reached') is not True:
+        if not _navigation_succeeded(raw):
             return owner._result(raw.get('task_status', 'verification_failed'), ok=False)
     stop = owner.safety.stop(request.robot_id, 'composition_visual_localization')
     cancel.raise_if_cancelled()

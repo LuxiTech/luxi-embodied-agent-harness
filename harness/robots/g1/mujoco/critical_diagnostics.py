@@ -58,7 +58,7 @@ class CriticalFrameRecorder:
         self.initialized = False
 
     def capture(self, payload, raw_points, filtered_points, *, model, data,
-                camera_ids, self_body_ids, carried_body_ids):
+                camera_ids, self_body_ids, carried_body_ids, camera_frames=None):
         nearest = payload.get('nearest_obstacle_distance')
         # Include the critical release band so hysteresis transitions still have evidence.
         if nearest is None or nearest > .60:
@@ -85,13 +85,28 @@ class CriticalFrameRecorder:
                   'output_cloud_stage': 'after_nearfield_ray_filter',
                   'self_body_ids': sorted(self_body_ids), 'carried_body_ids': sorted(carried_body_ids),
                   'identity': trigger_identity(model, data, point, camera_ids, self_body_ids, carried_body_ids)}
+        detail["camera_poses"] = [
+            {"camera_id": int(camera), "position": np.asarray(data.cam_xpos[camera]).tolist(),
+             "rotation": np.asarray(data.cam_xmat[camera]).tolist()}
+            for camera in camera_ids
+        ] if hasattr(data, "cam_xmat") else []
+        detail["depth_fov_degrees"] = 160
+        detail["voxel_size_m"] = .05
+        images = {}
+        detail["camera_frames"] = []
+        for index, (name, (depth, segmentation)) in enumerate((camera_frames or {}).items()):
+            if index >= 3:
+                break
+            images[f"camera_{index}_depth"] = np.asarray(depth)
+            images[f"camera_{index}_segmentation"] = np.asarray(segmentation)
+            detail["camera_frames"].append({"name": name, "prefix": f"camera_{index}"})
         target = pending / f'{self.run_id}-{payload["sequence"]}.npz'
         temporary = target.with_suffix('.tmp')
         try:
             with temporary.open('xb') as stream:
                 np.savez_compressed(stream, input_points=np.asarray(raw_points),
                                     filtered_points=points,
-                                    metadata=np.array(json.dumps(detail, allow_nan=False)))
+                                    metadata=np.array(json.dumps(detail, allow_nan=False)), **images)
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)

@@ -17,7 +17,7 @@ def location_catalog(path, scene_id):
             metadata[name] = {'kind': 'pose', 'aliases': list(location['aliases']),
                               'description': location.get('description', '人工标注的固定取物位姿，使用 target_source=reference。')}
             for alias in (name, *location['aliases']):
-                if alias in references or alias == 'start':
+                if alias in references or (alias == 'start' and name != 'start'):
                     raise ValueError('Duplicate or reserved annotated location')
                 references[alias] = pose
             continue

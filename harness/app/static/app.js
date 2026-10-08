@@ -409,6 +409,7 @@ function updateRecoveryStatus(recovery, taskRecovery, agentBusy) {
   const stateName = recovery.state || "idle";
   const continuationState = taskRecovery.state || "idle";
   const continuationVisible = taskRecovery.pending
+    || Boolean(taskRecovery.reason)
     || continuationState === "resume_limit_reached"
     || (continuationState === "replanning_original_task" && agentBusy);
   const visible = recovery.enabled && (stateName !== "idle" || continuationVisible);
@@ -427,17 +428,44 @@ function updateRecoveryStatus(recovery, taskRecovery, agentBusy) {
   const distance = Number.isFinite(recovery.retreat_distance_m)
     ? ` · 已回撤 ${Number(recovery.retreat_distance_m).toFixed(2)} m`
     : "";
-  if (stateName === "recovered_waiting_replan") {
-    if (taskRecovery.pending) {
-      $("#recovery-detail").textContent = `旧导航已取消；正在等待 Agent 结束旧请求，然后从最新第一人称观测重新规划原任务${distance}`;
-    } else if (continuationState === "resume_limit_reached") {
-      $("#recovery-detail").textContent = `自动恢复次数已达上限，机器人保持停车，等待新的人工指令${distance}`;
-    } else {
-      $("#recovery-detail").textContent = `没有正在执行的原任务可续跑；机器人保持停车，等待新指令${distance}`;
-    }
-  } else if (continuationState === "replanning_original_task" && agentBusy) {
+  const recoveryReasons = {
+    no_active_task: "安全中断时没有活动任务",
+    task_already_finished: "登记恢复时原任务已经结束",
+    task_replaced: "原任务已被新任务替换",
+    instruction_unavailable: "原任务指令缺失",
+    task_identity_unavailable: "原任务标识或指令缺失",
+    goal_not_confirmed: "任务目标尚未确认",
+    fixed_task_not_resumable: "该预定义任务不支持暂停续跑",
+    remaining_budget_exhausted: "原任务剩余执行预算已耗尽",
+    task_not_cancelled: "原任务未以可恢复的取消状态结束",
+    execution_error: "原任务执行异常，未保存可恢复进度",
+    progress_save_failed: "原任务进度保存失败",
+    progress_not_saved: "原任务已结束，但未生成恢复进度",
+    recovery_event_write_failed: "恢复记录写入失败",
+    cancellation_callback_failed: "任务取消回调失败",
+    recovery_registration_failed: "安全恢复意图登记失败",
+    recovery_state_unavailable: "无法读取或交接原任务恢复状态",
+    confirmed_goal_unavailable: "缺少与原任务匹配的已确认目标",
+    independent_long_task: "独立长运动任务已取消，不支持自动续跑",
+    handoff_rejected: "安全控制权交接被拒绝",
+    agent_cancel_timeout: "等待原任务结束超时",
+    resume_limit_reached: "自动恢复次数已达上限",
+  };
+  if (continuationState === "replanning_original_task" && agentBusy) {
     $("#recovery-title").textContent = "已基于新观测继续原任务";
-    $("#recovery-detail").textContent = `Agent 正在重新规划，未恢复旧速度或旧路径 · 自动续跑 ${taskRecovery.resume_attempts}/${taskRecovery.max_resumes} 次`;
+    $("#recovery-detail").textContent = `Agent 正在重新规划原任务 · 自动续跑 ${taskRecovery.resume_attempts}/${taskRecovery.max_resumes} 次`;
+  } else if (taskRecovery.reason) {
+    const reason = recoveryReasons[taskRecovery.reason] || taskRecovery.reason;
+    const detail = taskRecovery.detail ? `（${taskRecovery.detail}）` : "";
+    const motion = stateName === "recovered_waiting_replan" || stateName === "held"
+      ? "机器人保持停车" : "安全停车与回撤流程继续";
+    $("#recovery-detail").textContent = `原任务无法自动续跑：${reason}${detail}；${motion}${distance}`;
+  } else if (stateName === "recovered_waiting_replan") {
+    if (taskRecovery.pending) {
+      $("#recovery-detail").textContent = `已登记原任务恢复意图；等待停车与进度保存完成后重新规划${distance}`;
+    } else {
+      $("#recovery-detail").textContent = `未登记自动续跑任务；机器人保持停车，等待新指令${distance}`;
+    }
   } else if (stateName === "held") {
     $("#recovery-detail").textContent = `原因：${recovery.reason || "安全证据不足"}；新任务已锁定，请急停检查或复位${distance}`;
   } else {

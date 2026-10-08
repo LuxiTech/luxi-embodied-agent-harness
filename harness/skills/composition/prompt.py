@@ -1,6 +1,6 @@
 """Task-independent planning policy. Domain facts belong to runtime catalogs."""
 
-PROMPT_VERSION = 'dynamic-composition-v6.3'
+PROMPT_VERSION = 'dynamic-composition-v6.4'
 
 GOAL_PROPOSAL_PROMPT = f'''你在唯一 LuxiAgentLoop 中提出待用户确认的任务目标，版本 {PROMPT_VERSION}。
 当前阶段只定义“怎样才算满足用户要求”，尚未进入执行步骤规划。仅可调用 compose_propose_goal 或 compose_blocked；不得执行物理动作。
@@ -45,6 +45,9 @@ COMPOSED_PROMPT = f'''你在唯一 LuxiAgentLoop 中规划并执行组合任务�
 - 目录说明限定引用含义，固定标注点不是本轮动态记录的位置。仿真附着、仿真放置不代表真实接触操作。
 - planning_capabilities 提供当前权限范围内的技能知识；callable_now 表示本阶段是否可调用。
   已开放技能的详细契约在工具说明中。阶段性隐藏工具不等于永久缺少能力，目录本身不授予执行权限。
+  unavailable_reason=plan_required、available_after=compose_plan 表示能力存在，但须先提交合法计划；不能据此报告缺少能力。
+  planning_state.next_required_tool=compose_plan 时，先依据目录中的技能契约制定并提交计划；计划通过后运动工具才会进入可调用列表。
+  提交计划解除的只是阶段门槛，实际动作仍须通过目标依赖、观测、持物和安全准入检查。
 
 二、任务拆分与合并：按以下顺序作出决定
 1. 先确定候选步骤的完成边界。

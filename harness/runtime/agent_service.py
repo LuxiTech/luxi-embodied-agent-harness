@@ -22,6 +22,10 @@ class AgentRuntimeService:
         self.composed_tasks = dict(composed_tasks or {})
         self.composed_scope = composed_scope
         self._pause_requested = False
+        self._instruction = ""
+        self._submitted_task = None
+        self._run_finished = True
+        self._recovery_intent = None
         self._execution_mode = "terminal"
         self._active_task_id = None
         self.loop = loop
@@ -55,7 +59,7 @@ class AgentRuntimeService:
     # 区分首次提交、目标确认和暂停恢复；校验原指令、单次令牌及控制权。
     # 校验通过后启动 _run 线程，HTTP 请求无需等待整个物理任务完成。
     def submit_with_handoff(self, instruction: str, handoff: Callable[[], bool], *,
-                            execution_mode="terminal", task_key=None):
+                            execution_mode="terminal", task_key=None, recovery_task_id=None):
         try:
             validate_execution_mode(execution_mode)
         except ValueError as exc:
@@ -68,7 +72,12 @@ class AgentRuntimeService:
                 task = self.composed_tasks[task_key]
             elif task_key is not None:
                 from .composition_goals import DynamicTask
-                proposal = self.status().get("proposed_goal") or self.status().get("paused_goal")
+                if recovery_task_id is not None:
+                    with self._lock:
+                        intent = self._recovery_intent or {}
+                        proposal = intent.get("paused_goal") if intent.get("task_id") == recovery_task_id else None
+                else:
+                    proposal = self.status().get("proposed_goal") or self.status().get("paused_goal")
                 if not proposal or proposal["task_key"] != task_key:
                     return False, "目标提议已失效，请重新输入任务"
                 task = DynamicTask.from_payload(proposal)
@@ -85,6 +94,11 @@ class AgentRuntimeService:
         if rejection:
             return False, rejection
         with self._lock:
+            if recovery_task_id is not None:
+                intent = self._recovery_intent or {}
+                if (self._active_task_id != recovery_task_id or intent.get("task_id") != recovery_task_id
+                        or intent.get("state") != "saved"):
+                    return False, "安全恢复任务已失效或进度尚未保存"
             if self._closed:
                 return False, "Agent 服务已关闭"
             if self._thread is not None and self._thread.is_alive():
@@ -107,7 +121,11 @@ class AgentRuntimeService:
                                 payload={"task_key": task.task_key, "instruction": text})
             self._pause_requested = False
             self._execution_mode = execution_mode
-            self._active_task_id = new_id("task") if execution_mode == "composed" else None
+            self._active_task_id = new_id("task")
+            self._instruction = text
+            self._submitted_task = task
+            self._run_finished = False
+            self._recovery_intent = None
             self._cancel = CancellationToken()
             self._result = None
             self._error = ""
@@ -189,34 +207,116 @@ class AgentRuntimeService:
                                        execution_policy=ComposedPolicy("compose_verify"), task_spec=task,
                                        task_id=self._active_task_id)
             else:
-                result = self.loop.run(text, scope=self.scope, cancel=cancel)
+                result = self.loop.run(text, scope=self.scope, cancel=cancel, task_id=self._active_task_id)
         except Exception as exc:
             with self._lock:
                 self._error = str(exc)[:1000]
+                self._finish_recovery("execution_error")
+                self._run_finished = True
         else:
             with self._lock:
                 self._result = result
                 self._error = getattr(result, "error", "")
-                if (self._pause_requested and execution_mode == "composed" and getattr(task, "confirmed", False)
-                        and result.task_status == "cancelled"):
-                    import time
-                    from dataclasses import replace
-                    state = task_projection(self.store, self.scope.session_id, result.task_id)
-                    remaining_steps = scope.budget_steps-result.planning_steps
-                    remaining_tools = scope.budget_tools-result.tool_calls
-                    remaining_seconds = max(0, scope.deadline_monotonic-time.monotonic())
-                    if remaining_steps > 0 and remaining_tools > 0 and remaining_seconds > 0:
-                        projection = {k: state.get(k, {} if k != "held_entity" else None)
-                                      for k in ("attempts", "goal_evidence", "held_entity")}
-                        # Keep acquisition evidence, not executable old plans or unfinished actions.
-                        projection["steps"] = [step for step in state["steps"] if step["result"].get("acquired_goal")]
-                        paused = replace(task, task_key=new_id("resume"), resume_state={
-                            "projection": projection, "remaining_steps": remaining_steps,
-                            "remaining_tools": remaining_tools, "remaining_seconds": remaining_seconds,
-                            "consumed_steps": task.resume_state.get("consumed_steps", 0)+result.planning_steps,
-                            "consumed_tools": task.resume_state.get("consumed_tools", 0)+result.tool_calls})
-                        self.store.emit("task/paused", session_id=self.scope.session_id, task_id=result.task_id,
-                                        source="agent-service", payload={"paused_goal": paused.payload()})
+                try:
+                    if self._pause_requested:
+                        reason = self._save_paused_goal(task, scope, result)
+                        self._finish_recovery(reason)
+                    elif self._recovery_intent and self._recovery_intent["state"] == "requested":
+                        self._finish_recovery("" if result.task_status == "cancelled" else "task_not_cancelled")
+                except Exception:
+                    self._finish_recovery("progress_save_failed")
+                finally:
+                    self._run_finished = True
+
+    def _save_paused_goal(self, task, scope, result):
+        """Return an explicit rejection, or durably save the confirmed dynamic goal."""
+        import time
+        from dataclasses import replace
+        if result.task_id != self._active_task_id:
+            return "task_replaced"
+        if getattr(task, "kind", "") != "dynamic":
+            return "fixed_task_not_resumable"
+        if not getattr(task, "confirmed", False):
+            return "goal_not_confirmed"
+        if result.task_status != "cancelled":
+            return "task_not_cancelled"
+        remaining_steps = scope.budget_steps-result.planning_steps
+        remaining_tools = scope.budget_tools-result.tool_calls
+        remaining_seconds = max(0, scope.deadline_monotonic-time.monotonic())
+        if min(remaining_steps, remaining_tools, remaining_seconds) <= 0:
+            return "remaining_budget_exhausted"
+        state = task_projection(self.store, self.scope.session_id, result.task_id)
+        projection = {k: state.get(k, {} if k != "held_entity" else None)
+                      for k in ("attempts", "goal_evidence", "held_entity")}
+        projection["steps"] = [step for step in state["steps"] if step["result"].get("acquired_goal")]
+        paused = replace(task, task_key=new_id("resume"), resume_state={
+            "projection": projection, "remaining_steps": remaining_steps,
+            "remaining_tools": remaining_tools, "remaining_seconds": remaining_seconds,
+            "consumed_steps": task.resume_state.get("consumed_steps", 0)+result.planning_steps,
+            "consumed_tools": task.resume_state.get("consumed_tools", 0)+result.tool_calls})
+        self.store.emit("task/paused", session_id=self.scope.session_id, task_id=result.task_id,
+                        source="agent-service", payload={"paused_goal": paused.payload()})
+        if self._recovery_intent:
+            self._recovery_intent["paused_goal"] = paused.payload()
+        return ""
+
+    def _finish_recovery(self, reason):
+        intent = self._recovery_intent
+        if not intent or intent["state"] != "requested":
+            return
+        intent.update(state="unavailable" if reason else "saved", reason=reason)
+        try:
+            self.store.emit("task/recovery_unavailable" if reason else "task/recovery_saved",
+                            session_id=self.scope.session_id, task_id=intent["task_id"],
+                            source="agent-service", payload={"reason": reason})
+        except Exception:
+            # Stop/cancellation still proceeds if the event store itself is unavailable.
+            intent.update(state="unavailable", reason="recovery_event_write_failed")
+
+    def request_safety_recovery(self, *, rejection_reason=None):
+        """Atomically bind recovery to this task before cancellation can finish it."""
+        with self._lock:
+            if self._recovery_intent is not None:
+                return dict(self._recovery_intent)
+            intent = self._recovery_intent = {
+                "task_id": self._active_task_id, "instruction": self._instruction,
+                "execution_mode": self._execution_mode, "state": "requested", "reason": "",
+            }
+            try:
+                self.store.emit("task/recovery_requested", session_id=self.scope.session_id,
+                                task_id=self._active_task_id, source="agent-service",
+                                payload=dict(intent))
+            except Exception:
+                intent.update(state="unavailable", reason="recovery_event_write_failed")
+            if rejection_reason:
+                self._finish_recovery(rejection_reason)
+            elif self._run_finished or self._thread is None or not self._thread.is_alive():
+                self._finish_recovery("task_already_finished" if self._active_task_id else "no_active_task")
+            elif not self._instruction:
+                self._finish_recovery("instruction_unavailable")
+            elif self._execution_mode == "composed":
+                if getattr(self._submitted_task, "kind", "") != "dynamic":
+                    self._finish_recovery("fixed_task_not_resumable" if self._submitted_task else "goal_not_confirmed")
+                elif not self._submitted_task.confirmed:
+                    self._finish_recovery("goal_not_confirmed")
+                elif intent["state"] == "requested":
+                    self._pause_requested = True
+            # Capture and cancel this token under the same lock; never a successor's token.
+            if self._cancel is not None:
+                self._cancel.cancel()
+            try:
+                if self._on_cancel is not None:
+                    self._on_cancel()
+            except Exception:
+                self._finish_recovery("cancellation_callback_failed")
+            return dict(intent)
+
+    def recovery_snapshot(self, task_id):
+        with self._lock:
+            intent = self._recovery_intent or {}
+            if self._active_task_id != task_id or intent.get("task_id") != task_id:
+                return {"task_id": task_id, "state": "unavailable", "reason": "task_replaced", "busy": False}
+            return {**intent, "busy": self._thread is not None and self._thread.is_alive()}
 
     def pause(self):
         with self._lock:
@@ -242,6 +342,8 @@ class AgentRuntimeService:
                             source="agent-service", payload={"automatic_tool_replay": False})
             self._result = None
             self._active_task_id = None
+            self._recovery_intent = None
+            self._instruction = ""
             self._error = ""
 
     def status(self):

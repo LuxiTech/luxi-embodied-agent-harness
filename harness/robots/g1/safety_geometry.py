@@ -1,0 +1,9 @@
+"""Shared G1 planar envelope; distances are explicitly radii or clearances."""
+FOOTPRINT_RADIUS_M = 0.30
+WARNING_SURFACE_CLEARANCE_M = 0.55
+CRITICAL_SURFACE_CLEARANCE_M = 0.15
+IMMEDIATE_CRITICAL_SURFACE_CLEARANCE_M = 0.10
+RELEASE_SURFACE_CLEARANCE_M = 0.25
+# Normal planning reserves the critical clearance plus tracking margin.
+NAVIGATION_RADIUS_M = FOOTPRINT_RADIUS_M + CRITICAL_SURFACE_CLEARANCE_M + 0.03
+RECOVERY_MARGIN_M = 0.04

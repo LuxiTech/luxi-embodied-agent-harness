@@ -22,7 +22,8 @@ DYNAMIC_CONTRACTS = {
     },
     'compose_plan': {
         'preconditions': ['confirmed goal'],
-        'effects': ['record new plan revision; invalidate old step receipts; no physical motion'],
+        'effects': ['record new plan revision; invalidate old step receipts; no physical motion',
+                    'a valid plan removes the plan_required phase gate for supported motion skills; physical preconditions and safety checks still apply'],
         'steps': '每项只关联一个 goal_id；depends_on 引用前面的计划下标。completion 可为 '
                  'localized（有效视觉绑定）、pose（目标位姿及停稳证据）、goal（用户目标成立）。'
                  '持物/取得/释放/放置目标必须由 goal 步骤覆盖；位置目标也可由 pose 覆盖。'
